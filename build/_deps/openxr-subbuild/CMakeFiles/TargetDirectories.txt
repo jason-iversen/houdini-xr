@@ -1,3 +1,0 @@
-G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/openxr-populate.dir
-G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/ALL_BUILD.dir
-G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/ZERO_CHECK.dir
