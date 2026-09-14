@@ -1,0 +1,25 @@
+# CMake build output, including the fetched OpenXR SDK under build/_deps.
+# CMakeCache.txt hardcodes absolute paths from whichever machine configured it,
+# so this directory is never portable between checkouts.
+build/
+
+# Houdini auto-saves and backups
+backup/
+*.hip.bak
+*.hipnc.bak
+*.hip.autosave
+*.hipnc.autosave
+
+# Test renders written by scripts/run.cmd
+hxr_frame*.bmp
+hxr_frame*.png
+
+# Editor / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+desktop.ini
