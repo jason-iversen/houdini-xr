@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/openxr-populate"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/52b3f57ad1da9914f097ab5c0b5fae95/openxr-populate.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/b689f2b0c57ed2b4cd9ba8f5926a0e53/openxr-populate-complete.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-build.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-configure.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-download.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-install.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-mkdir.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-patch.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-test.rule"
+		},
+		{
+			"file" : "G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-subbuild/CMakeFiles/00ab98a4fc402e7e717dee886a8c7cb8/openxr-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"openxr-populate"
+		],
+		"name" : "openxr-populate"
+	}
+}

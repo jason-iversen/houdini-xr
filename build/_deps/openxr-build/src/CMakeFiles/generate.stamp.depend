@@ -1,0 +1,25 @@
+# CMake generation dependency list for this directory.
+C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeDependentOption.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CheckCSourceCompiles.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CheckFunctionExists.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CheckIncludeFile.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CheckLibraryExists.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CheckSymbolExists.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindOpenGL.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindPackageHandleStandardArgs.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindPackageMessage.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindPkgConfig.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindThreads.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindVulkan.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/Internal/CheckSourceCompiles.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/CMakeLists.txt
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/cmake/FindJsonCpp.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/cmake/StdFilesystemFlags.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/common_config.h.in
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/FindASan.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/FindMSan.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/FindSanitizers.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/FindTSan.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/FindUBSan.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/external/sanitizers-cmake/cmake/sanitize-helpers.cmake
+G:/My Drive/Projects/code/3dgs/houdini-xr/build/_deps/openxr-src/src/version.cmake

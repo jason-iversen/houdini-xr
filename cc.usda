@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    framesPerSecond = 24
+    metersPerUnit = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def HoudiniLayerInfo "HoudiniLayerInfo" (
+    customData = {
+        int HoudiniCreatorNode = 11
+        int[] HoudiniEditorNodes = [11, 14, 17, 20, 21, 23, 26]
+    }
+)
+{
+}
+
+def "templatebody" (
+    customData = {
+        int[] HoudiniPrimEditorNodes = [11, 14]
+    }
+    instanceable = true
+    prepend references = @C:/PROGRA~1/SIDEEF~1/HOUDIN~1.432/houdini/usd/assets/templatebody/templatebody.usd@
+)
+{
+    float3 xformOp:rotateXYZ = (0, 0, 0)
+    float3 xformOp:scale = (0.12962963, 0.12962963, 0.12962963)
+    double3 xformOp:translate = (-0.1799943447113037, 0.16088470816612244, -0.1752859205007553)
+    float3 xformOp:translate:pivot = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateXYZ", "xformOp:scale", "!invert!xformOp:translate:pivot"] (
+        customData = {
+            int[] HoudiniPrimEditorNodes = [14]
+        }
+    )
+}
+
+def "pig" (
+    customData = {
+        int[] HoudiniPrimEditorNodes = [20, 23]
+    }
+    instanceable = true
+    prepend references = @C:/PROGRA~1/SIDEEF~1/HOUDIN~1.432/houdini/usd/assets/pig/pig.usd@
+)
+{
+    float3 xformOp:rotateXYZ = (0, 37.620586, 0)
+    float3 xformOp:scale = (0.07741767, 0.07741767, 0.07741767)
+    double3 xformOp:translate = (-0.3442772626876831, 0.4005950391292572, -0.28289923816919327)
+    float3 xformOp:translate:pivot = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateXYZ", "xformOp:scale", "!invert!xformOp:translate:pivot"] (
+        customData = {
+            int[] HoudiniPrimEditorNodes = [23]
+        }
+    )
+}
+

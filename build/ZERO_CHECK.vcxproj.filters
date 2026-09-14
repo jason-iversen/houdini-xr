@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="G:\My Drive\Projects\code\3dgs\houdini-xr\build\CMakeFiles\275e24b171e0480feffc818acf39c64d\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{662EB906-E597-304D-803F-0AF1D2A8451E}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

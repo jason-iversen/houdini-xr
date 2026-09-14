@@ -1,0 +1,1 @@
+G:\My Drive\Projects\code\3dgs\houdini-xr\build\hxr_core.dir\Release\hxr_core.lib
