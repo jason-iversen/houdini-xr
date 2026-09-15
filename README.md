@@ -1,5 +1,8 @@
 # houdini-xr
 
+[![Demo](https://img.youtube.com/vi/yEqmtIXNiS4/maxresdefault.jpg)](https://www.youtube.com/watch?v=yEqmtIXNiS4)
+
+
 View a Houdini Solaris stage in a Meta Quest headset, in stereo, with head
 tracking — live, while you keep working in Houdini.
 
