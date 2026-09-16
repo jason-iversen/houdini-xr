@@ -27,9 +27,11 @@ public:
 
 protected:
     OP_ERROR cookMyLop(OP_Context& context) override;
+    bool     updateParmsFlags() override;
 
 private:
     static int onResyncCamera(void* data, int index, fpreal t, const PRM_Template* tplate);
+    static int onRefreezePose(void* data, int index, fpreal t, const PRM_Template* tplate);
 
     std::unique_ptr<HxrRuntime> myRuntime;
 

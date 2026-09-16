@@ -14,19 +14,25 @@
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
+// An XrPosef as a pose-local -> reference-space transform.
+inline GfMatrix4d XrPoseToMatrix(XrPosef const& pose)
+{
+    GfMatrix4d m(1.0);
+    m.SetRotate(GfQuatd(double(pose.orientation.w),
+                        double(pose.orientation.x),
+                        double(pose.orientation.y),
+                        double(pose.orientation.z)));
+    m.SetTranslateOnly(GfVec3d(double(pose.position.x),
+                               double(pose.position.y),
+                               double(pose.position.z)));
+    return m;
+}
+
 // xrLocateViews reports where each eye sits in the reference space, so the pose
 // is world-from-eye and the view matrix is its inverse.
 inline GfMatrix4d XrPoseToViewMatrix(XrPosef const& pose)
 {
-    GfMatrix4d eyeToWorld(1.0);
-    eyeToWorld.SetRotate(GfQuatd(double(pose.orientation.w),
-                                 double(pose.orientation.x),
-                                 double(pose.orientation.y),
-                                 double(pose.orientation.z)));
-    eyeToWorld.SetTranslateOnly(GfVec3d(double(pose.position.x),
-                                        double(pose.position.y),
-                                        double(pose.position.z)));
-    return eyeToWorld.GetInverse();
+    return XrPoseToMatrix(pose).GetInverse();
 }
 
 // OpenXR gives signed half-angles for an asymmetric frustum. Their tangents are

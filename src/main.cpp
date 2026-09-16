@@ -4,7 +4,7 @@
 
 #include "GLContext.h"
 #include "HxrRuntime.h"
-#include "StormRenderer.h"
+#include "HydraRenderer.h"
 #include "XrPlatform.h"
 
 #include <pxr/base/gf/frustum.h>
@@ -13,6 +13,7 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/sphere.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -27,6 +28,11 @@ struct Options
 {
     std::string stagePath;
     std::string outPath = "hxr_frame.bmp";
+    std::string renderer;   // Hydra plugin id; empty = Storm
+    int   maxWidth  = 0;    // per-eye render cap for --xr; 0 = uncapped
+    int   maxHeight = 0;
+    float converge  = 1.0f; // seconds to hold a pose for a progressive delegate
+    bool  frozen    = false;
     int  width  = 1280;
     int  height = 720;
     bool  xr     = false;
@@ -78,6 +84,14 @@ int RunProbe()
     std::printf("\n%s: %s\n", XR_KHR_OPENGL_ENABLE_EXTENSION_NAME,
                 hasOpenGl ? "SUPPORTED" : "NOT SUPPORTED");
 
+    // Registry listing only -- no GL context needed, and no attempt to load
+    // the plugins, so this reports what's discoverable rather than proven.
+    std::printf("\nHydra render delegates registered (pass one as --renderer):\n");
+    for (HydraRenderer::RendererInfo const& info : HydraRenderer::AvailableRenderers()) {
+        std::printf("  %-28s %s%s\n", info.id.GetText(), info.displayName.c_str(),
+                    info.id == HydraRenderer::DefaultRendererId() ? "  (default)" : "");
+    }
+
     return hasOpenGl ? 0 : 1;
 }
 
@@ -104,8 +118,17 @@ Options ParseArgs(int argc, char** argv)
             opts.anchorDist = std::stof(argv[++i]);
         } else if (arg == "--height" && hasNext) {
             opts.anchorHeight = std::stof(argv[++i]);
+        } else if (arg == "--renderer" && hasNext) {
+            opts.renderer = argv[++i];
+        } else if (arg == "--max-res" && hasNext) {
+            std::sscanf(argv[++i], "%dx%d", &opts.maxWidth, &opts.maxHeight);
+        } else if (arg == "--converge" && hasNext) {
+            opts.converge = std::stof(argv[++i]);
+        } else if (arg == "--frozen") {
+            opts.frozen = true;
         } else {
             std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--frames N]"
+                        " [--renderer PluginId] [--max-res WxH] [--converge S] [--frozen]"
                         " [--dist M] [--height M] [--out image.bmp] [--size WxH]\n");
         }
     }
@@ -162,11 +185,12 @@ bool WriteBmp(std::string const& path, std::vector<uint8_t> const& rgba, int w, 
 
 int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
 {
-    StormRenderer renderer;
-    if (!renderer.Init(GfVec2i(opts.width, opts.height))) {
+    HydraRenderer renderer;
+    renderer.Init(GfVec2i(opts.width, opts.height), /*viewCount*/ 1);
+    renderer.SetRendererPlugin(TfToken(opts.renderer));
+    if (!renderer.SetStage(stage)) {
         return 1;
     }
-    renderer.SetStage(stage);
     std::printf("Renderer: %s\n", renderer.RendererName().c_str());
 
     GfMatrix4d view;
@@ -175,12 +199,26 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
     GfFrustum frustum;
     frustum.SetPerspective(60.0, double(opts.width) / double(opts.height), 0.1, 1000.0);
 
-    renderer.RenderEye(view, frustum.ComputeProjectionMatrix());
+    // Progressive delegates need repeated passes at a fixed camera; keep
+    // going until converged or the convergence budget is spent.
+    const auto start = std::chrono::steady_clock::now();
+    int passes = 0;
+    do {
+        renderer.RenderEye(0, view, frustum.ComputeProjectionMatrix());
+        ++passes;
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= double(opts.converge) && !opts.frozen) {
+            break;
+        }
+    } while (!renderer.IsConverged(0));
+    std::printf("Converged: %s after %d pass%s\n", renderer.IsConverged(0) ? "yes" : "no",
+                passes, passes == 1 ? "" : "es");
 
     std::vector<uint8_t> pixels;
     int w = 0;
     int h = 0;
-    if (!renderer.ReadColor(pixels, w, h)) {
+    if (!renderer.ReadColor(0, pixels, w, h)) {
         return 1;
     }
     if (!WriteBmp(opts.outPath, pixels, w, h)) {
@@ -189,7 +227,8 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
     }
 
     std::printf("Wrote %dx%d -> %s\n", w, h, opts.outPath.c_str());
-    std::printf("Colour AOV GL texture id: %u\n", renderer.ColorTextureId());
+    const HydraRenderer::ColorTexture colour = renderer.GetColorTexture(0);
+    std::printf("Colour AOV GL texture id: %u (%dx%d)\n", colour.id, colour.width, colour.height);
 
     return 0;
 }
@@ -202,6 +241,10 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
 int RunXr(Options const& opts, UsdStageRefPtr const& stage)
 {
     HxrRuntime runtime;
+    runtime.SetRendererPlugin(opts.renderer);
+    runtime.SetMaxRenderSize(opts.maxWidth, opts.maxHeight);
+    runtime.SetConvergeSeconds(opts.converge);
+    runtime.SetFrozen(opts.frozen);
     runtime.SetStage(stage);
     runtime.SetAnchor(opts.anchorDist, opts.anchorHeight);
     runtime.Start();
@@ -233,6 +276,16 @@ int RunXr(Options const& opts, UsdStageRefPtr const& stage)
 
 int main(int argc, char** argv)
 {
+    // Houdini's DLLs must win over same-named system copies: Windows 11 ships
+    // its own, older onnxruntime.dll in System32, which Karma's dependencies
+    // would otherwise load and reject. System32 is searched before PATH, but
+    // SetDllDirectory slots in ahead of it. houdini.exe never needs this
+    // because $HFS/bin is its own directory, which is searched first of all.
+    wchar_t hfs[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"HFS", hfs, MAX_PATH) > 0) {
+        SetDllDirectoryW((std::wstring(hfs) + L"\\bin").c_str());
+    }
+
     const Options opts = ParseArgs(argc, argv);
 
     if (opts.probe) {

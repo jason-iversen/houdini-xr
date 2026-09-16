@@ -1,7 +1,6 @@
 #include "XrSession.h"
 
 #include "GLContext.h"
-#include "XrMath.h"
 
 #include <cstdio>
 #include <cstring>
@@ -9,8 +8,6 @@
 namespace {
 
 constexpr XrViewConfigurationType kViewConfig = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-constexpr double kNearPlane = 0.05;
-constexpr double kFarPlane  = 5000.0;
 
 bool Failed(XrResult result, const char* what)
 {
@@ -25,6 +22,15 @@ bool Failed(XrResult result, const char* what)
 
 bool XrViewportSession::Init(GLContext const& gl)
 {
+    const bool ok = _InitImpl(gl);
+    if (!ok) {
+        Shutdown();
+    }
+    return ok;
+}
+
+bool XrViewportSession::_InitImpl(GLContext const& gl)
+{
     const char* extensions[] = {XR_KHR_OPENGL_ENABLE_EXTENSION_NAME};
 
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -36,8 +42,18 @@ bool XrViewportSession::Init(GLContext const& gl)
     std::strncpy(instanceInfo.applicationInfo.engineName, "hydra-storm",
                  XR_MAX_ENGINE_NAME_SIZE - 1);
 
-    if (Failed(xrCreateInstance(&instanceInfo, &_instance), "xrCreateInstance")) {
-        std::fprintf(stderr, "  (run with --probe to list what the active runtime supports)\n");
+    const XrResult created = xrCreateInstance(&instanceInfo, &_instance);
+    if (Failed(created, "xrCreateInstance")) {
+        if (created == XR_ERROR_LIMIT_REACHED) {
+            // The loader allows one XrInstance per process. Failed Inits
+            // clean up after themselves, so reaching this means another
+            // session is genuinely alive -- e.g. a second XR Output node
+            // with Live on.
+            std::fprintf(stderr, "  (an XR session already exists in this process; "
+                                 "only one can run at a time)\n");
+        } else {
+            std::fprintf(stderr, "  (run with --probe to list what the active runtime supports)\n");
+        }
         return false;
     }
 
@@ -172,18 +188,14 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
             projectionViews.resize(located);
 
             for (uint32_t i = 0; i < located; ++i) {
-                const GfMatrix4d viewMatrix = XrPoseToViewMatrix(_views[i].pose);
-                const GfMatrix4d projMatrix =
-                    XrFovToProjectionMatrix(_views[i].fov, kNearPlane, kFarPlane);
-
-                const uint32_t texture = renderEye(i, viewMatrix, projMatrix);
-                if (!_presenter.PresentEye(i, texture)) {
+                const EyeImage image = renderEye(i, _views[i]);
+                if (!_presenter.PresentEye(i, image.texture, image.width, image.height)) {
                     return false;
                 }
 
                 projectionViews[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
-                projectionViews[i].pose = _views[i].pose;
-                projectionViews[i].fov  = _views[i].fov;
+                projectionViews[i].pose = image.pose;
+                projectionViews[i].fov  = image.fov;
                 projectionViews[i].subImage.swapchain = _presenter.Swapchain(i);
                 projectionViews[i].subImage.imageRect.offset = {0, 0};
                 projectionViews[i].subImage.imageRect.extent = {int32_t(_eyeWidth),

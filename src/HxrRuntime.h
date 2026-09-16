@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <thread>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -29,6 +30,37 @@ public:
     // it does not need a new stage or a call to Start() to see a new anchor.
     void SetStage(UsdStageRefPtr const& stage);
     void SetAnchor(float distMeters, float heightMeters);
+
+    // Hydra render delegate plugin id (e.g. HdStormRendererPlugin,
+    // BRAY_HdKarma). Empty means the default. Takes effect on the next frame,
+    // rebuilding the engine if a stage is already loaded.
+    void SetRendererPlugin(std::string const& pluginId);
+
+    // Caps the per-eye render size, preserving aspect; the result is upscaled
+    // to the swapchain on present. 0 in either dimension means uncapped. This
+    // is how a licence's render-size limit is respected (Apprentice: 1280x720)
+    // and how a progressive delegate is made responsive enough to be usable.
+    void SetMaxRenderSize(int maxWidth, int maxHeight);
+
+    // How the head pose used for rendering relates to the live one.
+    //
+    // A progressive delegate restarts accumulation on every camera change, so
+    // rendering at the live pose each frame means it never gets past its
+    // first, noisiest sample. Instead the pose is *held*: rendering continues
+    // at the held pose while the compositor reprojects the improving image to
+    // wherever the head actually is. The held frame stays spatially stable --
+    // it looks like a picture fixed in space, not stuck to the face.
+    //
+    //   converge seconds > 0 : hold until converged or the time is up, then
+    //                          re-capture the live pose and go again.
+    //   frozen               : hold indefinitely -- render to convergence and
+    //                          keep showing it. Refreeze re-captures.
+    //
+    // Storm converges in one pass, so with either setting it re-captures every
+    // frame and behaves exactly as a live viewport.
+    void SetConvergeSeconds(float seconds) { _convergeSeconds = seconds; }
+    void SetFrozen(bool frozen);
+    void RequestRefreeze() { _refreezeRequested = true; }
 
     // USD time code to render at -- by convention in Houdini/HUSD-authored
     // stages, 1 time-code unit == 1 Houdini frame (OP_Context::getFloatFrame()).
@@ -58,8 +90,15 @@ private:
     std::atomic<float>  _anchorHeight{1.2f};
     std::atomic<double> _timeCode{0.0};
     std::atomic<bool>   _resyncRequested{false};
+    std::atomic<int>    _maxRenderWidth{0};
+    std::atomic<int>    _maxRenderHeight{0};
+    std::atomic<float>  _convergeSeconds{1.0f};
+    std::atomic<bool>   _frozen{false};
+    std::atomic<bool>   _refreezeRequested{false};
 
     std::mutex     _stageMutex;
     UsdStageRefPtr _pendingStage;
     bool           _stageDirty = false;
+    std::string    _pendingRenderer;
+    bool           _rendererDirty = false;
 };

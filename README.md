@@ -26,9 +26,41 @@ Working and validated on hardware:
 - In-process Houdini LOP plugin bridging a live stage to the headset
 - Playbar time sync, so scrubbing and playback are reflected in the headset
 - Initial view positioned from a RenderSettings camera when one is authored
+- Upstream edits reach the headset automatically, without restarting the session
+- Selectable render delegate — Storm by default, with Karma CPU/XPU and any
+  other Hydra delegate Houdini registers available from a menu
 
 This is a working prototype, not a finished tool. There is no controller input,
 no in-headset navigation, and no UI beyond the node's parameters.
+
+**About Karma and other progressive renderers.** Storm is a rasterizer and
+renders a clean frame in one pass. Karma is a path tracer that converges over
+many passes, and every camera move restarts it — which in a headset would
+mean never getting past the first, noisiest sample. So the node *holds* your
+head pose while Karma accumulates, and the headset's compositor reprojects the
+improving image to wherever you're actually looking. The held image behaves
+like a picture fixed in space rather than one stuck to your face.
+
+- **Convergence Time** (default 1s): hold the pose until Karma converges or
+  the time is up, then re-capture where you're looking and go again. A
+  slowly-updating but usable preview.
+- **Freeze Pose**: hold indefinitely and render to full convergence — the
+  "frozen-pose" workflow. Place the view with your head, freeze, wait, look at
+  the result. **Refreeze Pose** re-captures from your current position.
+
+The practical way to work with Karma: set Renderer to Karma and Freeze Pose
+on, then turn **Interactive Placement** on. You get a live Storm view to walk
+around and line up the shot in. Turn Interactive Placement off, and Karma
+takes over frozen at exactly that pose and starts converging.
+
+Storm is unaffected by either: it converges in one pass, so it re-captures
+every frame and stays a normal live viewport. Lowering **Max Render
+Resolution** makes a big difference for Karma — 640×640 upscaled is far more
+responsive than the headset's native 2080×2096 per eye.
+
+Running Houdini Apprentice? Karma there is limited to 1280×720, and the node
+applies that cap automatically when a Karma delegate is selected (you'll see
+a warning badge on the node saying so).
 
 ## Requirements
 
@@ -71,17 +103,23 @@ Useful for checking your setup, and for iterating on the renderer without
 restarting Houdini each time.
 
 ```bash
-./scripts/run.cmd --probe              # what does the active OpenXR runtime support?
+./scripts/run.cmd --probe              # OpenXR runtime support + registered Hydra delegates
 ./scripts/run.cmd                      # render one frame to hxr_frame.bmp
 ./scripts/run.cmd --stage cc.usda      # ...from a USD file
 ./scripts/run.cmd --xr                 # stereo session to the headset
 ./scripts/run.cmd --xr --frames 600    # ...for a fixed number of frames
 ```
 
-Options: `--size WxH`, `--out image.bmp`, `--dist M`, `--height M`.
+Options: `--renderer PluginId`, `--max-res WxH`, `--converge S`, `--frozen`,
+`--size WxH`, `--out image.bmp`, `--dist M`, `--height M`.
 
 With no `--stage`, it renders a built-in sphere — enough to confirm the whole
 path works end to end.
+
+Karma won't run in the standalone tool: it resolves shaders through Houdini's
+operator framework, which only exists inside a real Houdini process. Use the
+Houdini node to test Karma; the standalone tool is for Storm and for checking
+your setup.
 
 ## Using the Houdini node
 
@@ -94,6 +132,12 @@ path works end to end.
 | Parameter | Effect |
 |---|---|
 | **Live** | Starts/stops the XR session |
+| **Interactive Placement** | Overrides to a live Storm view for placing the viewpoint; turn off to hand over to the configured delegate at that exact pose |
+| **Renderer** | Which Hydra delegate renders — Storm, Karma CPU/XPU, etc. |
+| **Max Render Resolution** | Caps the per-eye render size (0×0 = uncapped); upscaled to the headset |
+| **Convergence Time** | Seconds to hold the pose so a progressive renderer can accumulate |
+| **Freeze Pose** | Hold indefinitely and render to full convergence |
+| **Refreeze Pose** | Re-capture the pose from where you're looking now |
 | **Anchor Distance** | How far in front of you the stage sits (metres) |
 | **Anchor Height** | How high the stage sits (metres) |
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
@@ -102,12 +146,18 @@ The node is a passthrough — it doesn't modify the stage, so it can sit anywher
 in the chain.
 
 **Where you start from.** If the stage's RenderSettings prim targets a camera,
-your initial position and orientation in the headset match that camera — stand
-at your play area's origin facing forward and you see what it saw. Otherwise
-the stage is placed in front of you using Anchor Distance/Height. Either way
-the placement is set once when the session starts, so you're free to walk
-around afterwards rather than being dragged along by an animated camera. Press
-**Resync Camera** to re-snap.
+you start *at* that camera: it's placed at your head, facing the way you're
+facing, the moment you toggle Live. Otherwise the stage is placed in front of
+you using Anchor Distance/Height. Only your heading is used — the scene's
+floor stays level with the real one regardless of whether you were looking up
+or down. Either way the placement is set once when the session starts, so
+you're free to walk around afterwards rather than being dragged along by an
+animated camera. Press **Resync Camera** to re-snap from wherever you're
+standing now.
+
+Editing the scene upstream updates the headset automatically. That does *not*
+move your viewpoint — only **Resync Camera** does — so you can keep tweaking
+the scene from wherever you're standing.
 
 `cc.usda` and `crag.hipnc` in this directory are small test scenes. Note that
 `cc.usda` has no RenderSettings prim, so it exercises the Anchor
@@ -152,6 +202,10 @@ Close it and rebuild.
 
 **A wall of Oculus IPC log spam on exit.** Normal runtime teardown, not an
 error.
+
+**`Loader does not support simultaneous XrInstances`.** OpenXR allows one
+session per process, so this means another is already running — most likely a
+second XR Output node with Live on. Turn the other one off.
 
 ## Further reading
 

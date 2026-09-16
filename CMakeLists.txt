@@ -76,7 +76,7 @@ set(_hxr_defines NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
 # headset", however that stage arrives.
 add_library(hxr_core OBJECT
   src/GLContext.cpp
-  src/StormRenderer.cpp
+  src/HydraRenderer.cpp
   src/XrPresenterGL.cpp
   src/XrSession.cpp
   src/HxrRuntime.cpp

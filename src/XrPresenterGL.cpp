@@ -73,7 +73,7 @@ bool XrPresenterGL::CreateSwapchains(XrSession session, uint32_t width, uint32_t
     return true;
 }
 
-bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture)
+bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight)
 {
     ViewSwapchain& target = _views[view];
 
@@ -97,15 +97,27 @@ bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture)
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, target.images[index].image, 0);
 
-    // Storm's AOV is linear; the encode happens on write into an sRGB target.
+    // glBlitFramebuffer ignores the viewport but honours the scissor test.
+    // Hydra's render pass sets a scissor rect matching its render size and
+    // can leave it enabled; at full size that's invisible, but when rendering
+    // below swapchain resolution it clips the upscaled blit back down to a
+    // small rectangle in the corner.
+    const bool scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+    glDisable(GL_SCISSOR_TEST);
+
+    // The AOV is linear; the encode happens on write into an sRGB target.
     if (_srgb) {
         glEnable(GL_FRAMEBUFFER_SRGB);
     }
-    glBlitFramebuffer(0, 0, int(_width), int(_height),
+    glBlitFramebuffer(0, 0, srcWidth, srcHeight,
                       0, 0, int(_width), int(_height),
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     if (_srgb) {
         glDisable(GL_FRAMEBUFFER_SRGB);
+    }
+
+    if (scissorWasEnabled) {
+        glEnable(GL_SCISSOR_TEST);
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);

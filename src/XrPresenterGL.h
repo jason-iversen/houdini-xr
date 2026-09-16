@@ -18,8 +18,9 @@ public:
 
     XrSwapchain Swapchain(uint32_t view) const { return _views[view].swapchain; }
 
-    // Acquire, blit the source GL texture in, release.
-    bool PresentEye(uint32_t view, uint32_t srcTexture);
+    // Acquire, blit the source GL texture in, release. The source may be
+    // smaller than the swapchain image; the blit scales it up to fill.
+    bool PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight);
 
 private:
     struct ViewSwapchain
