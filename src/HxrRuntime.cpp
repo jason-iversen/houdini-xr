@@ -90,13 +90,10 @@ void HxrRuntime::SetMaxRenderSize(int maxWidth, int maxHeight)
     _maxRenderHeight = maxHeight;
 }
 
-void HxrRuntime::SetFrozen(bool frozen)
+void HxrRuntime::SetRendererMaxSize(int maxWidth, int maxHeight)
 {
-    // Turning freezing on captures the pose at that moment, rather than
-    // keeping whatever was last held from the timed mode.
-    if (_frozen.exchange(frozen) != frozen && frozen) {
-        _refreezeRequested = true;
-    }
+    _rendererMaxWidth  = maxWidth;
+    _rendererMaxHeight = maxHeight;
 }
 
 namespace {
@@ -232,6 +229,13 @@ void HxrRuntime::ThreadMain()
 
     constexpr double kNearPlane = 0.05;
     constexpr double kFarPlane  = 5000.0;
+    constexpr float  kTriggerHeldThreshold = 0.5f;
+
+    // What the node asked for vs what's actually running -- they differ while
+    // interactive placement (toggle or trigger) substitutes Storm.
+    std::string configuredRenderer;
+    std::string activeRenderer;
+    bool        lastFrozen = false;
 
     // The anchor: where the stage sits in the room. Latched once per session
     // (or on Resync), not re-evaluated every frame -- continuously following
@@ -297,10 +301,26 @@ void HxrRuntime::ThreadMain()
             }
         }
 
+        if (applyRenderer) {
+            configuredRenderer = newRenderer;
+        }
+
+        // Effective state: the toggle, or a trigger held past half travel.
+        // Resolved here rather than in the node so a trigger pull takes
+        // effect this frame, not after a cook.
+        const bool interactive =
+            _interactive.load() || xr.TriggerValue() > kTriggerHeldThreshold;
+        const bool  frozen          = !interactive && _frozen.load();
+        const float convergeSeconds = interactive ? 0.0f : _convergeSeconds.load();
+
         // Delegate first, so a stage arriving in the same frame builds its
         // engine once, with the right delegate, rather than twice.
-        if (applyRenderer) {
-            renderer.SetRendererPlugin(TfToken(newRenderer));
+        const std::string wantRenderer =
+            interactive ? HydraRenderer::DefaultRendererId().GetString() : configuredRenderer;
+        const bool rendererSwitched = wantRenderer != activeRenderer;
+        if (rendererSwitched) {
+            renderer.SetRendererPlugin(TfToken(wantRenderer));
+            activeRenderer = wantRenderer;
         }
         if (applyStage) {
             // This is what "syncs the delegate" on upstream change: SetStage
@@ -328,13 +348,17 @@ void HxrRuntime::ThreadMain()
 
         const double timeCode = _timeCode.load();
 
-        // Cheap to re-derive every frame (two atomics), and SetRenderSize is a
-        // no-op when unchanged -- so the cap can be adjusted live.
-        const GfVec2i renderSize =
-            FitWithin(eyeSize, _maxRenderWidth.load(), _maxRenderHeight.load());
+        // Cheap to re-derive every frame (a few atomics), and SetRenderSize is
+        // a no-op when unchanged -- so the caps can be adjusted live. The
+        // renderer-specific cap only binds when the configured delegate is
+        // the one rendering.
+        GfVec2i renderSize = FitWithin(eyeSize, _maxRenderWidth.load(), _maxRenderHeight.load());
+        if (!interactive) {
+            renderSize = FitWithin(renderSize, _rendererMaxWidth.load(), _rendererMaxHeight.load());
+        }
         renderer.SetRenderSize(renderSize);
 
-        const bool contentChanged = applyStage || applyRenderer ||
+        const bool contentChanged = applyStage || rendererSwitched ||
                                     timeCode != lastTimeCode ||
                                     worldFromStage != lastWorldFromStage ||
                                     renderSize != lastRenderSize;
@@ -350,9 +374,13 @@ void HxrRuntime::ThreadMain()
         // Decide once per frame whether every eye re-captures the live pose.
         // Both eyes must move together or they'd disagree about where the
         // head is.
-        const bool  frozen          = _frozen.load();
-        const float convergeSeconds = _convergeSeconds.load();
-        const auto  now             = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+
+        // Freezing captures the pose at the moment it takes effect -- whether
+        // from the toggle, or from a trigger being released with Freeze Pose
+        // set -- rather than keeping whatever was last held.
+        const bool froze = frozen && !lastFrozen;
+        lastFrozen = frozen;
 
         // Only a decision here -- the capture itself happens in the callback,
         // and so does bookkeeping about it. RenderFrame may not call the
@@ -360,7 +388,7 @@ void HxrRuntime::ThreadMain()
         // or the views aren't valid yet, both routine at session start), and
         // recording "held" before the pose was actually taken is how a zero
         // pose ends up in xrEndFrame.
-        bool recapture = _refreezeRequested.exchange(false);
+        bool recapture = _refreezeRequested.exchange(false) || froze;
         if (!recapture && !frozen) {
             bool allConverged = true;
             for (HeldEye const& eye : held) {

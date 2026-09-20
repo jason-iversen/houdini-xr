@@ -54,8 +54,20 @@ public:
     uint32_t EyeHeight() const { return _eyeHeight; }
     uint32_t ViewCount() const { return uint32_t(_viewConfigs.size()); }
 
+    // Either hand's trigger, 0..1, as of the most recent RenderFrame. One
+    // action bound to both hands: OpenXR resolves that to whichever is pulled
+    // further, so no per-hand bookkeeping is needed. Reads 0 whenever input
+    // isn't active (session not focused, controllers asleep).
+    float TriggerValue() const { return _triggerValue; }
+
+    // Right-hand thumbstick, each axis -1..1, +y pushed away from the user.
+    // Zero whenever input isn't active.
+    XrVector2f RightThumbstick() const { return _rightThumbstick; }
+
 private:
     bool _InitImpl(GLContext const& gl);
+    bool _InitInput();
+    void _SyncInput();
 
     XrInstance _instance = XR_NULL_HANDLE;
     XrSystemId _systemId = XR_NULL_SYSTEM_ID;
@@ -69,6 +81,12 @@ private:
 
     uint32_t _eyeWidth  = 0;
     uint32_t _eyeHeight = 0;
+
+    XrActionSet _actionSet        = XR_NULL_HANDLE;
+    XrAction    _triggerAction    = XR_NULL_HANDLE;
+    XrAction    _thumbstickAction = XR_NULL_HANDLE;
+    float       _triggerValue     = 0.0f;
+    XrVector2f  _rightThumbstick{0.0f, 0.0f};
     bool     _running   = false;
     bool     _quit      = false;
 };

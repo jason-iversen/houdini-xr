@@ -119,7 +119,107 @@ bool XrViewportSession::_InitImpl(GLContext const& gl)
     _eyeWidth  = _viewConfigs[0].recommendedImageRectWidth;
     _eyeHeight = _viewConfigs[0].recommendedImageRectHeight;
 
-    return _presenter.CreateSwapchains(_session, _eyeWidth, _eyeHeight, viewCount);
+    if (!_presenter.CreateSwapchains(_session, _eyeWidth, _eyeHeight, viewCount)) {
+        return false;
+    }
+
+    // Controller input is a convenience, not a requirement: a runtime with no
+    // controller profile still gets a working (trigger-less) session.
+    if (!_InitInput()) {
+        std::fprintf(stderr, "Controller input unavailable; trigger override disabled\n");
+    }
+    return true;
+}
+
+bool XrViewportSession::_InitInput()
+{
+    XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(setInfo.actionSetName, "hxr", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(setInfo.localizedActionSetName, "Houdini XR", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    if (Failed(xrCreateActionSet(_instance, &setInfo, &_actionSet), "xrCreateActionSet")) {
+        return false;
+    }
+
+    // A float action rather than boolean: Touch exposes the trigger as
+    // /trigger/value with no /click, and a boolean source can still be bound
+    // to a float action where a profile only has that.
+    XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
+    actionInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    std::strncpy(actionInfo.actionName, "interactive_placement", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(actionInfo.localizedActionName, "Interactive Placement",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &actionInfo, &_triggerAction), "xrCreateAction")) {
+        return false;
+    }
+
+    auto path = [this](const char* s) {
+        XrPath p = XR_NULL_PATH;
+        xrStringToPath(_instance, s, &p);
+        return p;
+    };
+
+    // Suggest per profile; a runtime ignores profiles it doesn't know. Both
+    // hands bind to the one action.
+    struct Profile
+    {
+        const char* profile;
+        const char* left;
+        const char* right;
+    };
+    const Profile profiles[] = {
+        {"/interaction_profiles/oculus/touch_controller",
+         "/user/hand/left/input/trigger/value", "/user/hand/right/input/trigger/value"},
+        {"/interaction_profiles/khr/simple_controller",
+         "/user/hand/left/input/select/click", "/user/hand/right/input/select/click"},
+    };
+
+    bool anyAccepted = false;
+    for (Profile const& p : profiles) {
+        const XrActionSuggestedBinding bindings[] = {
+            {_triggerAction, path(p.left)},
+            {_triggerAction, path(p.right)},
+        };
+        XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggested.interactionProfile     = path(p.profile);
+        suggested.countSuggestedBindings = 2;
+        suggested.suggestedBindings      = bindings;
+        if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(_instance, &suggested))) {
+            anyAccepted = true;
+        }
+    }
+    if (!anyAccepted) {
+        std::fprintf(stderr, "No interaction profile accepted the trigger bindings\n");
+        return false;
+    }
+
+    XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets      = &_actionSet;
+    return !Failed(xrAttachSessionActionSets(_session, &attachInfo), "xrAttachSessionActionSets");
+}
+
+void XrViewportSession::_SyncInput()
+{
+    _triggerValue = 0.0f;
+    if (_actionSet == XR_NULL_HANDLE) {
+        return;
+    }
+
+    XrActiveActionSet active{_actionSet, XR_NULL_PATH};
+    XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets      = &active;
+    // XR_SESSION_NOT_FOCUSED is routine (another app has input); not an error.
+    if (XR_FAILED(xrSyncActions(_session, &syncInfo))) {
+        return;
+    }
+
+    XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = _triggerAction;
+    XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
+    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &state)) && state.isActive) {
+        _triggerValue = state.currentState;
+    }
 }
 
 bool XrViewportSession::PollEvents()
@@ -155,6 +255,8 @@ bool XrViewportSession::PollEvents()
 
 bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
 {
+    _SyncInput();
+
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     if (Failed(xrWaitFrame(_session, &waitInfo, &frameState), "xrWaitFrame")) {
@@ -225,6 +327,13 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
 void XrViewportSession::Shutdown()
 {
     _presenter.Destroy();
+
+    // Destroying the set destroys its actions.
+    if (_actionSet != XR_NULL_HANDLE) {
+        xrDestroyActionSet(_actionSet);
+        _actionSet     = XR_NULL_HANDLE;
+        _triggerAction = XR_NULL_HANDLE;
+    }
 
     if (_space != XR_NULL_HANDLE) {
         xrDestroySpace(_space);

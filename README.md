@@ -49,9 +49,11 @@ like a picture fixed in space rather than one stuck to your face.
   the result. **Refreeze Pose** re-captures from your current position.
 
 The practical way to work with Karma: set Renderer to Karma and Freeze Pose
-on, then turn **Interactive Placement** on. You get a live Storm view to walk
-around and line up the shot in. Turn Interactive Placement off, and Karma
-takes over frozen at exactly that pose and starts converging.
+on. Then **hold either controller trigger** — you get a live Storm view to
+walk around and line up the shot in. Release the trigger, and Karma takes
+over frozen at exactly that pose and starts converging. The **Interactive
+Placement** toggle does the same thing from the node if you'd rather not hold
+the trigger.
 
 Storm is unaffected by either: it converges in one pass, so it re-captures
 every frame and stays a normal live viewport. Lowering **Max Render
@@ -132,7 +134,7 @@ your setup.
 | Parameter | Effect |
 |---|---|
 | **Live** | Starts/stops the XR session |
-| **Interactive Placement** | Overrides to a live Storm view for placing the viewpoint; turn off to hand over to the configured delegate at that exact pose |
+| **Interactive Placement** | Overrides to a live Storm view for placing the viewpoint; turn off to hand over to the configured delegate at that exact pose. **Holding either controller trigger does the same thing** for as long as it's held |
 | **Renderer** | Which Hydra delegate renders — Storm, Karma CPU/XPU, etc. |
 | **Max Render Resolution** | Caps the per-eye render size (0×0 = uncapped); upscaled to the headset |
 | **Convergence Time** | Seconds to hold the pose so a progressive renderer can accumulate |

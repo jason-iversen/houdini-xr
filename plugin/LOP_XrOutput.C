@@ -216,31 +216,31 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     myRuntime->SetAnchor(float(evalFloat(theDistName, 0, t)),
                          float(evalFloat(theHeightName, 0, t)));
 
-    // Interactive Placement substitutes a live Storm view for whatever is
-    // configured, so the viewpoint can be placed at full speed; turning it
-    // off hands the exact same pose to the slow delegate. The order below
-    // matters for that handover: SetFrozen(true) captures the pose on its
-    // off->on transition, so it must see the delegate switch in the same cook.
-    const bool interactive = evalInt(theInteractiveName, 0, t) != 0;
-
+    // The node only ever hands over what's *configured*. Interactive
+    // Placement -- from this toggle, or from a controller trigger held in the
+    // headset -- is resolved on the render thread, where it can take effect
+    // the same frame rather than after a cook.
     UT_String rendererParm;
     evalString(rendererParm, theRendererName, 0, t);
-    const std::string rendererId =
-        interactive ? HydraRenderer::DefaultRendererId().GetString() : rendererParm.toStdString();
+    const std::string rendererId = rendererParm.toStdString();
     myRuntime->SetRendererPlugin(rendererId);
+    myRuntime->SetInteractive(evalInt(theInteractiveName, 0, t) != 0);
 
-    int maxWidth  = int(evalInt(theMaxResName, 0, t));
-    int maxHeight = int(evalInt(theMaxResName, 1, t));
+    myRuntime->SetMaxRenderSize(int(evalInt(theMaxResName, 0, t)),
+                                int(evalInt(theMaxResName, 1, t)));
+
+    // The licence cap is tied to the configured delegate, so it's passed
+    // separately: while Storm is substituted for placement it doesn't apply.
     if (RunningAsApprentice() && IsKarma(rendererId)) {
-        maxWidth  = TightestCap(maxWidth,  kApprenticeKarmaMaxWidth);
-        maxHeight = TightestCap(maxHeight, kApprenticeKarmaMaxHeight);
+        myRuntime->SetRendererMaxSize(kApprenticeKarmaMaxWidth, kApprenticeKarmaMaxHeight);
         addWarning(LOP_MESSAGE, "Apprentice licence: Karma render capped at 1280 x 720 "
                                 "per eye and upscaled to the headset");
+    } else {
+        myRuntime->SetRendererMaxSize(0, 0);
     }
-    myRuntime->SetMaxRenderSize(maxWidth, maxHeight);
 
-    myRuntime->SetConvergeSeconds(interactive ? 0.0f : float(evalFloat(theConvergeName, 0, t)));
-    myRuntime->SetFrozen(!interactive && evalInt(theFrozenName, 0, t) != 0);
+    myRuntime->SetConvergeSeconds(float(evalFloat(theConvergeName, 0, t)));
+    myRuntime->SetFrozen(evalInt(theFrozenName, 0, t) != 0);
 
     // HUSD authors USD time samples using the Houdini frame number (not
     // context.getTime(), which is seconds), so this is what keeps the

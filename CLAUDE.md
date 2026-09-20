@@ -227,11 +227,20 @@ Node parameters: `Live`, `Interactive Placement`, `Renderer`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
 `Anchor Distance`, `Anchor Height`, `Resync Camera`.
 
-`Interactive Placement` is node-level only: `cookMyLop` substitutes Storm /
-0s / not-frozen for the configured values (and greys those parms out via
-`updateParmsFlags`). The handover on turning it off relies on `SetFrozen`
-capturing the pose on its off→on transition, in the same cook as the delegate
-switch — keep that ordering if touching either.
+**Interactive Placement is resolved on the render thread**, not in the node:
+effective = the toggle OR either controller trigger held past half travel
+(`XrViewportSession::TriggerValue()`, one float action bound to both hands
+on the Oculus Touch and Khronos simple profiles; OpenXR resolves two sources
+to whichever is pulled further). The node only ever sends *configured*
+values (`SetRendererPlugin`, `SetConvergeSeconds`, `SetFrozen`,
+`SetInteractive`); `HxrRuntime` substitutes Storm / 0s / not-frozen while
+effective-interactive is true, and greys the overridden parms via
+`updateParmsFlags` for the toggle only. A trigger routed back through a
+Houdini cook would lag, which is why this isn't node-level. The freeze
+capture happens on the *effective* frozen false→true transition, so releasing
+the trigger with Freeze Pose set freezes right there. The Apprentice cap is
+passed separately (`SetRendererMaxSize`) because it binds to the configured
+delegate, not to the Storm substitute.
 
 Anything that changes what a held pose would render — new stage, new
 delegate, time code, anchor, render size — un-converges the held frames, so a

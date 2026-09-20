@@ -38,9 +38,21 @@ public:
 
     // Caps the per-eye render size, preserving aspect; the result is upscaled
     // to the swapchain on present. 0 in either dimension means uncapped. This
-    // is how a licence's render-size limit is respected (Apprentice: 1280x720)
-    // and how a progressive delegate is made responsive enough to be usable.
+    // is how a progressive delegate is made responsive enough to be usable.
     void SetMaxRenderSize(int maxWidth, int maxHeight);
+
+    // A further cap that applies only while the *configured* delegate is the
+    // one rendering -- a licence limit on that delegate (Apprentice caps Karma
+    // at 1280x720). Interactive placement runs Storm, which it doesn't bind.
+    void SetRendererMaxSize(int maxWidth, int maxHeight);
+
+    // Interactive Placement: render a live Storm view regardless of what's
+    // configured, so the viewpoint can be placed at full speed. The effective
+    // state is this toggle OR a held controller trigger, resolved on the
+    // render thread each frame -- a trigger routed back through a Houdini
+    // cook would lag. Turning it off hands the exact same pose to the
+    // configured delegate: if that's frozen, the freeze captures right there.
+    void SetInteractive(bool on) { _interactive = on; }
 
     // How the head pose used for rendering relates to the live one.
     //
@@ -59,7 +71,7 @@ public:
     // Storm converges in one pass, so with either setting it re-captures every
     // frame and behaves exactly as a live viewport.
     void SetConvergeSeconds(float seconds) { _convergeSeconds = seconds; }
-    void SetFrozen(bool frozen);
+    void SetFrozen(bool frozen) { _frozen = frozen; }
     void RequestRefreeze() { _refreezeRequested = true; }
 
     // USD time code to render at -- by convention in Houdini/HUSD-authored
@@ -92,8 +104,11 @@ private:
     std::atomic<bool>   _resyncRequested{false};
     std::atomic<int>    _maxRenderWidth{0};
     std::atomic<int>    _maxRenderHeight{0};
+    std::atomic<int>    _rendererMaxWidth{0};
+    std::atomic<int>    _rendererMaxHeight{0};
     std::atomic<float>  _convergeSeconds{1.0f};
     std::atomic<bool>   _frozen{false};
+    std::atomic<bool>   _interactive{false};
     std::atomic<bool>   _refreezeRequested{false};
 
     std::mutex     _stageMutex;
