@@ -6,9 +6,9 @@
 
 #include <memory>
 
-PXR_NAMESPACE_USING_DIRECTIVE
+#include "HxrRuntime.h"
 
-class HxrRuntime;
+PXR_NAMESPACE_USING_DIRECTIVE
 
 // A sink LOP: passes its input stage through unmodified, and while the
 // "Live" toggle is on, hands each cook's stage to a background HxrRuntime
@@ -33,6 +33,11 @@ private:
     static int onResyncCamera(void* data, int index, fpreal t, const PRM_Template* tplate);
     static int onRefreezePose(void* data, int index, fpreal t, const PRM_Template* tplate);
 
+    // Main thread only. Records a head pose as keyframes on the placement
+    // parms at the current playbar time; cookMyLop authors the camera from
+    // those parms.
+    void applyPlacement(HxrRuntime::CameraPlacement const& placement);
+
     std::unique_ptr<HxrRuntime> myRuntime;
 
     // Houdini's own "data got dirtied" counter for our input, used to decide
@@ -42,4 +47,9 @@ private:
     // Set by the Resync Camera button, consumed by the next cook, so the
     // resync is always evaluated against a freshly flattened stage.
     bool myResyncPending = false;
+
+    // Set whenever this node's own output changed for reasons the input's
+    // version can't see (a camera placement authored here), so the next
+    // cook reflattens regardless.
+    bool myOutputDirty = false;
 };

@@ -152,40 +152,56 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    XrActionCreateInfo stickInfo{XR_TYPE_ACTION_CREATE_INFO};
+    stickInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+    std::strncpy(stickInfo.actionName, "move", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(stickInfo.localizedActionName, "Move", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &stickInfo, &_thumbstickAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo clickInfo{XR_TYPE_ACTION_CREATE_INFO};
+    clickInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(clickInfo.actionName, "place_camera", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(clickInfo.localizedActionName, "Place Camera", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &clickInfo, &_thumbClickAction), "xrCreateAction")) {
+        return false;
+    }
+
     auto path = [this](const char* s) {
         XrPath p = XR_NULL_PATH;
         xrStringToPath(_instance, s, &p);
         return p;
     };
 
-    // Suggest per profile; a runtime ignores profiles it doesn't know. Both
-    // hands bind to the one action.
-    struct Profile
-    {
-        const char* profile;
-        const char* left;
-        const char* right;
-    };
-    const Profile profiles[] = {
-        {"/interaction_profiles/oculus/touch_controller",
-         "/user/hand/left/input/trigger/value", "/user/hand/right/input/trigger/value"},
-        {"/interaction_profiles/khr/simple_controller",
-         "/user/hand/left/input/select/click", "/user/hand/right/input/select/click"},
-    };
-
+    // Suggest per profile; a runtime ignores profiles it doesn't know. The
+    // trigger action binds to both hands; the stick is right-hand only. The
+    // Khronos simple profile has no thumbstick, so it only gets the trigger.
     bool anyAccepted = false;
-    for (Profile const& p : profiles) {
+
+    {
         const XrActionSuggestedBinding bindings[] = {
-            {_triggerAction, path(p.left)},
-            {_triggerAction, path(p.right)},
+            {_triggerAction,    path("/user/hand/left/input/trigger/value")},
+            {_triggerAction,    path("/user/hand/right/input/trigger/value")},
+            {_thumbstickAction, path("/user/hand/right/input/thumbstick")},
+            {_thumbClickAction, path("/user/hand/right/input/thumbstick/click")},
         };
         XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        suggested.interactionProfile     = path(p.profile);
+        suggested.interactionProfile     = path("/interaction_profiles/oculus/touch_controller");
+        suggested.countSuggestedBindings = 4;
+        suggested.suggestedBindings      = bindings;
+        anyAccepted |= XR_SUCCEEDED(xrSuggestInteractionProfileBindings(_instance, &suggested));
+    }
+    {
+        const XrActionSuggestedBinding bindings[] = {
+            {_triggerAction, path("/user/hand/left/input/select/click")},
+            {_triggerAction, path("/user/hand/right/input/select/click")},
+        };
+        XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggested.interactionProfile     = path("/interaction_profiles/khr/simple_controller");
         suggested.countSuggestedBindings = 2;
         suggested.suggestedBindings      = bindings;
-        if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(_instance, &suggested))) {
-            anyAccepted = true;
-        }
+        anyAccepted |= XR_SUCCEEDED(xrSuggestInteractionProfileBindings(_instance, &suggested));
     }
     if (!anyAccepted) {
         std::fprintf(stderr, "No interaction profile accepted the trigger bindings\n");
@@ -200,7 +216,9 @@ bool XrViewportSession::_InitInput()
 
 void XrViewportSession::_SyncInput()
 {
-    _triggerValue = 0.0f;
+    _triggerValue           = 0.0f;
+    _rightThumbstick        = {0.0f, 0.0f};
+    _rightThumbstickPressed = false;
     if (_actionSet == XR_NULL_HANDLE) {
         return;
     }
@@ -215,10 +233,25 @@ void XrViewportSession::_SyncInput()
     }
 
     XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+
     getInfo.action = _triggerAction;
-    XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
-    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &state)) && state.isActive) {
-        _triggerValue = state.currentState;
+    XrActionStateFloat trigger{XR_TYPE_ACTION_STATE_FLOAT};
+    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &trigger)) && trigger.isActive) {
+        _triggerValue = trigger.currentState;
+    }
+
+    getInfo.action = _thumbstickAction;
+    XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+    if (XR_SUCCEEDED(xrGetActionStateVector2f(_session, &getInfo, &stick)) && stick.isActive) {
+        _rightThumbstick = stick.currentState;
+    }
+
+    // Edge, not level: the runtime tracks changes between syncs, so this is
+    // true for exactly one frame per press.
+    getInfo.action = _thumbClickAction;
+    XrActionStateBoolean click{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &click)) && click.isActive) {
+        _rightThumbstickPressed = click.changedSinceLastSync && click.currentState;
     }
 }
 
@@ -331,8 +364,10 @@ void XrViewportSession::Shutdown()
     // Destroying the set destroys its actions.
     if (_actionSet != XR_NULL_HANDLE) {
         xrDestroyActionSet(_actionSet);
-        _actionSet     = XR_NULL_HANDLE;
-        _triggerAction = XR_NULL_HANDLE;
+        _actionSet        = XR_NULL_HANDLE;
+        _triggerAction    = XR_NULL_HANDLE;
+        _thumbstickAction = XR_NULL_HANDLE;
+        _thumbClickAction = XR_NULL_HANDLE;
     }
 
     if (_space != XR_NULL_HANDLE) {

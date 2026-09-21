@@ -143,6 +143,30 @@ your setup.
 | **Anchor Distance** | How far in front of you the stage sits (metres) |
 | **Anchor Height** | How high the stage sits (metres) |
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
+| **Move Speed** | Thumbstick locomotion speed, metres per second |
+| **Apply Camera Placement** | Author the RenderSettings camera from the placement keys below |
+| **Placement Translate / Rotate** | The placed camera's pose in stage space — keyed by the thumbstick click |
+
+**Controller input in the headset:**
+
+| Input | Effect |
+|---|---|
+| Either trigger (held) | Interactive Placement while held — live Storm view |
+| Right thumbstick | Move: forward/back and strafe, relative to where you're looking |
+| Right thumbstick click | **Place the camera** where your head is, at the current frame |
+
+Moving with the thumbstick is smooth locomotion — it doesn't change your
+tracked position, it moves the scene around you. **Resync Camera** puts you
+back at the camera.
+
+**Placing the camera.** Walk the scene, line up the view you want, and click
+the right thumbstick. That keys your head's position and orientation (pitch
+included) onto the node's Placement Translate/Rotate parameters at the current
+frame and turns Apply Camera Placement on, and the node then authors the
+RenderSettings camera at that pose. Because they're ordinary keyframes, the
+placements survive saving the scene, show up in the channel editor, and can be
+edited, moved or deleted there like any other animation. Scrub to another
+frame, move, click again, and you're keyframing a camera move from inside it.
 
 The node is a passthrough — it doesn't modify the stage, so it can sit anywhere
 in the chain.

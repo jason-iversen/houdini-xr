@@ -2,7 +2,10 @@
 
 #include <pxr/usd/usd/stage.h>
 
+#include <pxr/base/gf/matrix4d.h>
+
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -53,6 +56,23 @@ public:
     // cook would lag. Turning it off hands the exact same pose to the
     // configured delegate: if that's frozen, the freeze captures right there.
     void SetInteractive(bool on) { _interactive = on; }
+
+    // Right-thumbstick locomotion speed at full deflection, metres per
+    // second. Movement is relative to the head's horizontal heading.
+    void SetMoveSpeed(float metresPerSecond) { _moveSpeed = metresPerSecond; }
+
+    // Invoked, ON THE RENDER THREAD, when the right thumbstick is clicked:
+    // the head's full pose (position and orientation, pitch included) in
+    // *stage* coordinates -- i.e. the transform a camera prim would need to
+    // see exactly what the user sees. The callee owns marshalling this to
+    // wherever it can act on it; this class knows nothing about Houdini.
+    struct CameraPlacement
+    {
+        GfMatrix4d cameraToStage;
+        double     timeCode = 0.0;
+    };
+    using PlacementCallback = std::function<void(CameraPlacement const&)>;
+    void SetPlacementCallback(PlacementCallback callback);
 
     // How the head pose used for rendering relates to the live one.
     //
@@ -110,10 +130,14 @@ private:
     std::atomic<bool>   _frozen{false};
     std::atomic<bool>   _interactive{false};
     std::atomic<bool>   _refreezeRequested{false};
+    std::atomic<float>  _moveSpeed{1.5f};
 
     std::mutex     _stageMutex;
     UsdStageRefPtr _pendingStage;
     bool           _stageDirty = false;
     std::string    _pendingRenderer;
     bool           _rendererDirty = false;
+
+    std::mutex        _callbackMutex;
+    PlacementCallback _placementCallback;
 };

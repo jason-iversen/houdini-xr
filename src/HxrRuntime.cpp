@@ -96,6 +96,12 @@ void HxrRuntime::SetRendererMaxSize(int maxWidth, int maxHeight)
     _rendererMaxHeight = maxHeight;
 }
 
+void HxrRuntime::SetPlacementCallback(PlacementCallback callback)
+{
+    std::lock_guard<std::mutex> lock(_callbackMutex);
+    _placementCallback = std::move(callback);
+}
+
 namespace {
 
 // A room-level frame taken from a head pose: where the head is, and which way
@@ -237,6 +243,21 @@ void HxrRuntime::ThreadMain()
     std::string activeRenderer;
     bool        lastFrozen = false;
 
+    // Thumbstick locomotion: the user's accumulated displacement through the
+    // scene, in room space. Moving the user forward through the stage is the
+    // same thing as shifting the stage backward, so this is folded into the
+    // placement as a final translation by its negation. Direction follows the
+    // head's *live* horizontal heading (you move where you look), which is
+    // only known inside the render callback -- so it's the previous frame's,
+    // one frame of latency that isn't perceptible.
+    GfVec3d    locomotion(0.0, 0.0, 0.0);
+    HeadFrame  liveHead;
+    GfMatrix4d liveHeadToWorld(1.0);   // full pose, for camera placement
+    bool       haveLiveHead = false;
+    auto       lastFrameTime = std::chrono::steady_clock::now();
+    constexpr double kStickDeadzone = 0.15;
+    constexpr double kMaxFrameDt    = 0.1;   // don't lurch after a stall
+
     // The anchor: where the stage sits in the room. Latched once per session
     // (or on Resync), not re-evaluated every frame -- continuously following
     // the render camera would drag the user's whole reference frame around on
@@ -334,17 +355,56 @@ void HxrRuntime::ThreadMain()
         if (_resyncRequested.exchange(false)) {
             anchorLatched    = false;
             anchorFromCamera = false;
+            locomotion       = GfVec3d(0.0, 0.0, 0.0);   // resync means "back to the camera"
         }
 
         if (!xr.IsRunning()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            lastFrameTime = std::chrono::steady_clock::now();
             continue;
+        }
+
+        {
+            const auto   frameNow = std::chrono::steady_clock::now();
+            const double dt = std::min(
+                kMaxFrameDt, std::chrono::duration<double>(frameNow - lastFrameTime).count());
+            lastFrameTime = frameNow;
+
+            const XrVector2f stick = xr.RightThumbstick();
+            GfVec2d deflection(stick.x, stick.y);
+            const double magnitude = deflection.GetLength();
+            if (magnitude > kStickDeadzone) {
+                // Rescale so movement starts from zero at the deadzone edge
+                // rather than jumping to 15% speed.
+                deflection *= (magnitude - kStickDeadzone) / ((1.0 - kStickDeadzone) * magnitude);
+
+                const GfVec3d forward = liveHead.forward;
+                const GfVec3d right(-forward[2], 0.0, forward[0]);
+                locomotion += (forward * deflection[1] + right * deflection[0]) *
+                              double(_moveSpeed.load()) * dt;
+            }
         }
 
         // The anchor itself is latched inside the render callback, where the
         // head pose is available. Anchor Distance/Height are read live in
         // here, so those sliders still take effect without a resync.
-        GfMatrix4d worldFromStage = computeWorldFromStage();
+        GfMatrix4d worldFromStage = computeWorldFromStage() * Translation(-locomotion);
+
+        // Thumbstick click: report where the head is, in stage space, to
+        // whoever wants to place a camera there. Uses the previous frame's
+        // pose, like locomotion does. Row-vector: head-local -> world ->
+        // stage, so the result is what a camera's local-to-world would be.
+        if (xr.RightThumbstickPressed() && haveLiveHead && anchorLatched) {
+            PlacementCallback callback;
+            {
+                std::lock_guard<std::mutex> lock(_callbackMutex);
+                callback = _placementCallback;
+            }
+            if (callback) {
+                callback(CameraPlacement{liveHeadToWorld * worldFromStage.GetInverse(),
+                                         _timeCode.load()});
+            }
+        }
 
         const double timeCode = _timeCode.load();
 
@@ -403,14 +463,20 @@ void HxrRuntime::ThreadMain()
         auto renderEye = [&](uint32_t index, XrView const& current) {
             HeldEye& eye = held[index];
 
+            if (index == 0) {
+                liveHeadToWorld = XrPoseToMatrix(current.pose);
+                liveHead        = HeadFrameFromPose(current.pose);
+                haveLiveHead    = true;
+            }
+
             // Latch the anchor from the first eye's pose. Eye 0 is ~3cm off
             // the head centre, which is well below anything noticeable here.
             if (index == 0 && !anchorLatched && renderer.Stage()) {
-                anchorHead       = HeadFrameFromPose(current.pose);
+                anchorHead       = liveHead;
                 anchorFromCamera = FindRenderCameraTransform(
                     renderer.Stage(), UsdTimeCode(timeCode), &stageFromCamera);
                 anchorLatched = true;
-                worldFromStage = computeWorldFromStage();
+                worldFromStage = computeWorldFromStage() * Translation(-locomotion);
                 std::printf("HxrRuntime: anchor latched %s, head at (%.2f, %.2f, %.2f)\n",
                             anchorFromCamera ? "to RenderSettings camera"
                                              : "to Anchor Distance/Height",

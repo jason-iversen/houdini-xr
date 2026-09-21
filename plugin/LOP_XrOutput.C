@@ -1,7 +1,8 @@
 #include "LOP_XrOutput.h"
-#include "HxrRuntime.h"
 #include "HydraRenderer.h"
+#include "RenderCamera.h"
 
+#include <CH/CH_Manager.h>
 #include <HUSD/HUSD_DataHandle.h>
 #include <HUSD/HUSD_RendererInfo.h>
 #include <OP/OP_DataMicroNode.h>
@@ -9,6 +10,7 @@
 #include <OP/OP_OperatorTable.h>
 #include <PRM/PRM_Include.h>
 #include <UT/UT_DSOVersion.h>
+#include <UT/UT_HoudiniExecutionContext.h>
 
 // Silences C4003 (macro too few args), which fires from USD's own macros
 // under MSVC -- same guard SideFX uses in their own LOP samples.
@@ -16,8 +18,12 @@
 ARCH_PRAGMA_PUSH
 ARCH_PRAGMA_MACRO_TOO_FEW_ARGUMENTS
 #include <HUSD/XUSD_Data.h>
+#include <pxr/base/gf/rotation.h>
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usdGeom/xformable.h>
+#include <pxr/usd/usdGeom/xformOp.h>
+#include <pxr/usd/usdRender/settings.h>
 ARCH_PRAGMA_POP
 
 #include <windows.h>
@@ -69,6 +75,29 @@ int TightestCap(int a, int b)
 constexpr int kApprenticeKarmaMaxWidth  = 1280;
 constexpr int kApprenticeKarmaMaxHeight = 720;
 
+// Placement rotate parms are XYZ Euler in Gf's row-vector composition:
+// R = Rx * Ry * Rz. Decompose and recompose must agree on this, so both go
+// through here.
+GfMatrix4d RotationFromEuler(GfVec3d const& degrees)
+{
+    GfMatrix4d m;
+    m.SetRotate(GfRotation(GfVec3d::XAxis(), degrees[0]) *
+                GfRotation(GfVec3d::YAxis(), degrees[1]) *
+                GfRotation(GfVec3d::ZAxis(), degrees[2]));
+    return m;
+}
+
+GfVec3d EulerFromMatrix(GfMatrix4d const& m)
+{
+    // ExtractRotation wants orthonormal axes; the stage-space camera matrix
+    // carries the inverse of the stage's metersPerUnit as a uniform scale.
+    GfMatrix4d rotation = m;
+    rotation.SetTranslateOnly(GfVec3d(0.0));
+    rotation.Orthonormalize(/*issueWarning*/ false);
+    return rotation.ExtractRotation().Decompose(
+        GfVec3d::XAxis(), GfVec3d::YAxis(), GfVec3d::ZAxis());
+}
+
 } // namespace
 
 void
@@ -93,11 +122,16 @@ static PRM_Name theRefreezeName("refreeze", "Refreeze Pose");
 static PRM_Name theDistName("dist", "Anchor Distance");
 static PRM_Name theHeightName("height", "Anchor Height");
 static PRM_Name theResyncName("resync", "Resync Camera");
+static PRM_Name theMoveSpeedName("movespeed", "Move Speed");
+static PRM_Name theApplyPlacementName("applyplacement", "Apply Camera Placement");
+static PRM_Name thePlaceTranslateName("pt", "Placement Translate");
+static PRM_Name thePlaceRotateName("pr", "Placement Rotate");
 
 static PRM_Default theRendererDefault(0, "HdStormRendererPlugin");
 static PRM_Default theConvergeDefault(1.0);
 static PRM_Default theDistDefault(2.0);
 static PRM_Default theHeightDefault(1.2);
+static PRM_Default theMoveSpeedDefault(1.5);
 
 static PRM_Range theConvergeRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 10.0);
 
@@ -171,6 +205,16 @@ LOP_XrOutput::myTemplateList[] = {
     PRM_Template(PRM_FLT,    1, &theHeightName, &theHeightDefault),
     PRM_Template(PRM_CALLBACK, 1, &theResyncName, 0, 0, 0,
                 &LOP_XrOutput::onResyncCamera),
+    // Right-thumbstick locomotion, metres per second at full deflection.
+    PRM_Template(PRM_FLT,    1, &theMoveSpeedName, &theMoveSpeedDefault),
+    // Camera placement. Clicking the right thumbstick in the headset keys
+    // the head's stage-space pose onto pt/pr at the current frame and turns
+    // Apply on; cookMyLop then authors the RenderSettings camera from them.
+    // Keyframes rather than hidden state, so the placements survive a .hip
+    // save, show in the channel editor, and can be edited or deleted there.
+    PRM_Template(PRM_TOGGLE, 1, &theApplyPlacementName, PRMzeroDefaults),
+    PRM_Template(PRM_XYZ,    3, &thePlaceTranslateName, PRMzeroDefaults),
+    PRM_Template(PRM_XYZ,    3, &thePlaceRotateName,    PRMzeroDefaults),
     PRM_Template(),
 };
 
@@ -184,6 +228,22 @@ LOP_XrOutput::LOP_XrOutput(OP_Network* net, const char* name, OP_Operator* op)
     : LOP_Node(net, name, op)
     , myRuntime(std::make_unique<HxrRuntime>())
 {
+    // The callback fires on the render thread. Everything it needs to do --
+    // set keyframes, dirty the node -- must happen on Houdini's main thread,
+    // so it's posted to the event loop. The node is looked up by id when the
+    // event runs rather than captured by pointer: an event can outlive the
+    // node if the user deletes it in between.
+    const int nodeId = getUniqueId();
+    myRuntime->SetPlacementCallback([nodeId](HxrRuntime::CameraPlacement const& placement) {
+        if (!UT_HoudiniExecutionContext::hasInstance()) {
+            return;
+        }
+        UT_HoudiniExecutionContext::instance()->post([nodeId, placement]() {
+            if (auto* node = dynamic_cast<LOP_XrOutput*>(OP_Node::lookupNode(nodeId))) {
+                node->applyPlacement(placement);
+            }
+        });
+    });
 }
 
 LOP_XrOutput::~LOP_XrOutput()
@@ -205,6 +265,43 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
 
     const fpreal t = context.getTime();
     const bool live = evalInt(theLiveName, 0, t) != 0;
+
+    // Camera placement: author the RenderSettings camera's transform from
+    // the keyed parms. This is the one place this node edits the stage, and
+    // it must finish (write lock released) before the read lock below.
+    const bool applyPlacement = evalInt(theApplyPlacementName, 0, t) != 0;
+    if (applyPlacement) {
+        HUSD_AutoWriteLock writelock(editableDataHandle());
+        HUSD_AutoLayerLock layerlock(writelock);
+        UsdStageRefPtr     stage = writelock.data()->stage();
+
+        SdfPath cameraPath;
+        if (!FindRenderCameraPath(stage, &cameraPath)) {
+            addWarning(LOP_MESSAGE, "Apply Camera Placement is on, but the stage has no "
+                                    "RenderSettings camera to place");
+        } else {
+            const UsdTimeCode frame(context.getFloatFrame());
+            UsdGeomXformable  camera(stage->GetPrimAtPath(cameraPath));
+
+            GfVec3d translate, rotate;
+            for (int i = 0; i < 3; ++i) {
+                translate[i] = evalFloat(thePlaceTranslateName, i, t);
+                rotate[i]    = evalFloat(thePlaceRotateName, i, t);
+            }
+            GfMatrix4d stageXform = RotationFromEuler(rotate);
+            stageXform.SetTranslateOnly(translate);
+
+            // The parms hold the pose in stage space, which is what the user
+            // sees; the op is local to whatever the camera is parented under.
+            const GfMatrix4d local =
+                stageXform * camera.ComputeParentToWorldTransform(frame).GetInverse();
+
+            // A single matrix op, overriding the camera's own op stack in
+            // this node's layer; the value is a time sample at this frame.
+            camera.MakeMatrixXform().Set(local, frame);
+            setLastModifiedPrims(UT_StringRef(cameraPath.GetText()));
+        }
+    }
 
     // If an upstream LOP bakes a fully time-sampled stage in one cook (common
     // for cached/baked animation), this node may otherwise never cook again
@@ -241,6 +338,7 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
 
     myRuntime->SetConvergeSeconds(float(evalFloat(theConvergeName, 0, t)));
     myRuntime->SetFrozen(evalInt(theFrozenName, 0, t) != 0);
+    myRuntime->SetMoveSpeed(float(evalFloat(theMoveSpeedName, 0, t)));
 
     // HUSD authors USD time samples using the Houdini frame number (not
     // context.getTime(), which is seconds), so this is what keeps the
@@ -282,7 +380,14 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
             // flattens when the input's data actually changed, not on every
             // forced per-frame recook. The timing is printed so the real cost
             // is measured rather than assumed.
-            if (inputVersion != myLastInputVersion) {
+            //
+            // The input's version can't see edits made by this node itself,
+            // so a fresh placement forces one, and so does a Resync while a
+            // placement is applied -- that's when the snapshot's camera is
+            // actually read.
+            const bool outputChanged = myOutputDirty || (applyPlacement && myResyncPending);
+            if (inputVersion != myLastInputVersion || outputChanged) {
+                myOutputDirty = false;
                 using Clock = std::chrono::steady_clock;
                 const Clock::time_point start = Clock::now();
 
@@ -320,6 +425,48 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     }
 
     return error();
+}
+
+void
+LOP_XrOutput::applyPlacement(HxrRuntime::CameraPlacement const& placement)
+{
+    const GfVec3d position = placement.cameraToStage.ExtractTranslation();
+    const GfVec3d degrees  = EulerFromMatrix(placement.cameraToStage);
+
+    // A convention mismatch between decompose and recompose would silently
+    // place the camera facing the wrong way; make it loud instead.
+    {
+        GfMatrix4d original = placement.cameraToStage;
+        original.SetTranslateOnly(GfVec3d(0.0));
+        original.Orthonormalize(false);
+        const GfMatrix4d rebuilt = RotationFromEuler(degrees);
+        double maxErr = 0.0;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                maxErr = std::max(maxErr, std::fabs(original[r][c] - rebuilt[r][c]));
+            }
+        }
+        if (maxErr > 1e-4) {
+            std::fprintf(stderr, "hxr_output: Euler round-trip error %.4f -- "
+                                 "camera placement rotation may be wrong\n", maxErr);
+        }
+    }
+
+    // Key at the playbar's current time, in seconds -- the frame the runtime
+    // saw is the same one unless the playbar moved in the last few ms.
+    const fpreal t = CHgetEvalTime();
+    for (int i = 0; i < 3; ++i) {
+        setFloat(thePlaceTranslateName.getToken(), i, t, position[i], PRM_AK_FORCE_KEY);
+        setFloat(thePlaceRotateName.getToken(),    i, t, degrees[i],  PRM_AK_FORCE_KEY);
+    }
+    setInt(theApplyPlacementName.getToken(), 0, t, 1);
+
+    std::printf("hxr_output: camera placed at frame %.1f -- (%.2f, %.2f, %.2f) rot (%.1f, %.1f, %.1f)\n",
+                placement.timeCode, position[0], position[1], position[2],
+                degrees[0], degrees[1], degrees[2]);
+
+    myOutputDirty = true;
+    forceRecook();
 }
 
 bool

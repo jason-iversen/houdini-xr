@@ -64,6 +64,9 @@ public:
     // Zero whenever input isn't active.
     XrVector2f RightThumbstick() const { return _rightThumbstick; }
 
+    // True only on the frame the right thumbstick is clicked down.
+    bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
+
 private:
     bool _InitImpl(GLContext const& gl);
     bool _InitInput();
@@ -85,8 +88,10 @@ private:
     XrActionSet _actionSet        = XR_NULL_HANDLE;
     XrAction    _triggerAction    = XR_NULL_HANDLE;
     XrAction    _thumbstickAction = XR_NULL_HANDLE;
+    XrAction    _thumbClickAction = XR_NULL_HANDLE;
     float       _triggerValue     = 0.0f;
     XrVector2f  _rightThumbstick{0.0f, 0.0f};
+    bool        _rightThumbstickPressed = false;
     bool     _running   = false;
     bool     _quit      = false;
 };

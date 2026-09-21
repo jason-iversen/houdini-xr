@@ -225,7 +225,43 @@ every stage reaching `HydraRenderer` is a fresh immutable flattened copy.
 
 Node parameters: `Live`, `Interactive Placement`, `Renderer`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
-`Anchor Distance`, `Anchor Height`, `Resync Camera`.
+`Anchor Distance`, `Anchor Height`, `Resync Camera`, `Move Speed`,
+`Apply Camera Placement`, `Placement Translate`, `Placement Rotate`.
+
+**Controller input** (`XrViewportSession`, one action set): trigger (float,
+both hands), right thumbstick (Vector2f), right thumbstick click (boolean,
+edge via `changedSinceLastSync`). Synced at the top of every `RenderFrame`;
+all read as zero when the session isn't focused.
+
+**Locomotion** is an accumulated room-space displacement folded into the
+placement as a final `Translation(-locomotion)` — moving the user forward is
+shifting the stage backward. Direction follows the *live* head heading from
+the previous frame's callback. Reset by Resync (which means "back to the
+camera").
+
+**Camera placement crosses the thread boundary the other way.** The render
+thread computes the head's stage-space pose (`liveHeadToWorld *
+worldFromStage⁻¹`, full orientation this time — pitch included, it's a
+camera) and hands it to a callback. `hxr_core` stays HDK-free: the *plugin*
+installs the callback, which posts to Houdini's main loop via
+`UT_HoudiniExecutionContext::instance()->post()` (the C++ counterpart of
+`hou.ui.postEventCallback`), looking the node up by `getUniqueId()` at
+dispatch time rather than capturing a pointer an event could outlive. On the
+main thread `applyPlacement` sets keyframes (`setFloat(..., PRM_AK_FORCE_KEY)`
+at `CHgetEvalTime()`) on the `pt`/`pr` parms and `forceRecook()`s; `cookMyLop`
+authors the camera from those parms under `HUSD_AutoWriteLock` +
+`HUSD_AutoLayerLock` (the `LOP_Sphere` pattern), via `MakeMatrixXform()` with
+a time sample at the current frame, converting the stage-space parm pose to
+the camera's parent-local space. Placements live in keyframes, not hidden
+node state, because `cookModifyInput` rebuilds the layer every cook — and so
+they persist, show in the channel editor, and are editable. The rotate parms
+are XYZ Euler in Gf row-vector composition (`Rx*Ry*Rz`); `EulerFromMatrix` /
+`RotationFromEuler` are the single source of truth for that, and
+`applyPlacement` round-trips and warns if they ever disagree. The write lock
+must be released before the live block's read lock. Since the input's
+`modVersion` can't see the node's own edits, a placement sets `myOutputDirty`
+to force one reflatten, and Resync-while-applied does too (that's when the
+snapshot's camera is actually read).
 
 **Interactive Placement is resolved on the render thread**, not in the node:
 effective = the toggle OR either controller trigger held past half travel
