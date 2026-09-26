@@ -20,6 +20,7 @@ inherently PCVR — Houdini runs on the PC, frames are streamed to the headset.
 ./scripts/run.cmd --probe            # OpenXR runtime extensions + registered delegates
 ./scripts/run.cmd                    # offscreen: render one frame to hxr_frame.bmp
 ./scripts/run.cmd --xr               # stereo session to the headset (Ctrl+C to stop)
+./scripts/run.cmd --desktop          # capture the monitor as the headset panel would, to a BMP
 ```
 
 Build a single target — needed often, because Houdini holds a lock on the
@@ -43,8 +44,8 @@ After a Houdini update, rebuild the plugin before launching — the deployed DLL
 is linked against the previous install's libraries.
 
 `run.cmd` flags: `--stage file.usd`, `--renderer PluginId`, `--max-res WxH`,
-`--converge S`, `--frozen`, `--pick`, `--reticle`, `--frames N`, `--size WxH`,
-`--dist M`, `--height M`, `--out image.bmp`.
+`--converge S`, `--frozen`, `--mono`, `--pick`, `--reticle`, `--desktop`, `--frames N`,
+`--size WxH`, `--dist M`, `--height M`, `--out image.bmp`.
 
 The offscreen camera is fixed at (0, 1.5, 6) looking at the origin — it does
 not use the stage's RenderSettings camera — so scenes that aren't a few metres
@@ -77,8 +78,10 @@ src/            # hxr_core — pure USD/Hydra/OpenXR/WGL, no Houdini HDK
   XrMath.h        XrPosef/XrFovf -> GfMatrix4d, via GfFrustum
   RenderCamera.*  Resolves the stage's RenderSettings -> camera path/transform
   Reticle.*       Draws the reticle into the bound framebuffer (headset + offscreen)
+  DesktopCapture.* Mirrors a monitor into a GL texture (DXGI duplication +
+                  WGL_NV_DX_interop2) for the in-headset desktop panel
   HxrRuntime.*    Owns the render thread; the seam both consumers share
-  main.cpp        Standalone harness (offscreen / --xr / --probe)
+  main.cpp        Standalone harness (offscreen / --xr / --probe / --desktop)
 plugin/         # LOP_HoudiniXR — the Houdini side
   LOP_XrOutput.* The "XR Output" LOP node (hxr_output)
 scripts/        # build/run wrappers
@@ -167,8 +170,29 @@ on a single shared engine reports `IsConverged()`; false means progressive,
 and per-view engines are built sharing one `Hgi` via `HdDriver`. Storm stays
 on one engine and pays nothing.
 
+**Single-eye ("mono") rendering** — the node's `Stereo` toggle, off by
+default — renders the configured delegate once instead of per eye: half the
+work, so Karma converges twice as fast, at the cost of all depth (no
+parallax). Interactive placement is always stereo. The one view is
+`CyclopeanView`: midway between the eyes, eye 0's orientation (a Quest's
+eyes are parallel), and the **union** of both eyes' FOVs — they're
+asymmetric, each reaching further to its own side, so rendering one real eye
+and showing it to both would leave the other eye a black strip on its outer
+edge. It's rendered at the union's size relative to one eye (`MonoScale`,
+~1.14× wider on a Quest 2) to keep pixel density; that factor is latched once
+per session, since a render size that flickered by a pixel would restart a
+progressive delegate forever. Only `held[0]` renders; every other eye is a
+*mirror* that submits `held[0]`'s image, pose and FOV, and the compositor
+reprojects it to each eye. Convergence is judged on `held[0]` alone (a
+mirror never renders, so never converges). Switching mono ↔ stereo forces a
+re-capture (the held pose means something different in each) and pauses the
+other eyes' own engines (`HydraRenderer::PauseView`) — a progressive delegate
+keeps accumulating in the background after its last render, so an idle
+second-eye Karma would otherwise hold the GPU until it converged. The next
+`RenderEye` for that view resumes it.
+
 Anything that changes what a held pose would render — new stage, new delegate,
-time code, anchor, render size — un-converges the held frames, so a frozen view
+time code, anchor, render size, mono ↔ stereo — un-converges the held frames, so a frozen view
 never keeps showing a stale image, or (after an engine rebuild) a texture that
 no longer exists. That invalidation lives in `HxrRuntime`'s loop; keep it in
 sync if you add another input that affects the render.
@@ -207,7 +231,10 @@ an orbit composed after it), which breaks as soon as they interleave: after a
 90° orbit the thumbstick moved you sideways, since its direction is computed
 in room space but was applied in pre-orbit space. Moving the user forward is
 shifting the stage backward, so locomotion appends `Translation(-step)`.
-Direction follows the *live* head heading from the previous frame's callback.
+Direction is the *live* head's full orientation from the previous frame's
+callback, pitch included — free flight, deliberately unlike the anchor's
+heading-only rule: the right stick dollies along the view vector and strafes
+along the head's right axis, and A/B move along the head's up axis.
 Snap turn appends `T(-pivot) * R_y(±angle) * T(pivot)` with the pivot on the
 head centre's vertical axis, so the view turns in place; turning the user
 right is *+yaw* on the stage (+Y rotation carries what's ahead to the left). A
@@ -260,11 +287,16 @@ the pivot, so the scene turns *with* the hand (grab-and-turn; flip the delta
 to reverse). On release it's committed into `userXform`, and the final
 `worldFromStage` is computed **after** that commit — otherwise the release
 frame renders the pre-orbit placement for one frame, a visible flicker. Grip
-also counts as effective-interactive (Storm while held), for the same reason
+also counts as effective-interactive (the interactive renderer while held),
+for the same reason
 as the trigger: orbiting changes the view every frame, which would restart a
 progressive delegate continuously. The controller pose comes from an OpenXR
 action space located after `xrWaitFrame` (it needs the predicted display
-time), so it can't live in `_SyncInput`.
+time), so it can't live in `_SyncInput`. While the orbit is active the
+reticle is drawn at the pivot — fixed in room space by construction, since
+`orbitLive` rotates about it — and gaze picking is suspended; following the
+gaze mid-orbit made the reticle wander off the point being orbited. Release
+forces an immediate re-pick.
 
 ### Camera placement crosses the thread boundary the other way
 
@@ -318,19 +350,66 @@ path, so there's only one source of truth for the time.
 The left trigger still counts as interactive placement, which is what a
 scrub needs anyway: each frame change would restart a progressive delegate.
 
+### The desktop panel is captured at the OS level
+
+The left menu button shows Houdini's interface on a panel in the headset. The
+HDK has no way to render Houdini's UI into a texture, so `DesktopCapture`
+mirrors **the whole monitor** Houdini's main window is on (the process's
+largest visible top-level window; the primary monitor for the standalone
+exe). Not the window: Houdini's menus, the Tab menu included, are separate
+popup windows that a window capture misses.
+
+Capture is DXGI Desktop Duplication, on a D3D11 device created on the
+adapter that owns the monitor (a requirement of duplication). The image is
+`CopyResource`d into a texture of ours that's registered with GL through
+`WGL_NV_DX_interop2` — no CPU copy — and locked only around the GL blit.
+Everything runs on the render thread with the GL context current: the D3D11
+immediate context is single-threaded, and so is this. `AcquireNextFrame(0)`
+never blocks; pointer-only updates arrive with `LastPresentTime == 0` and no
+new image. Losing the duplication (UAC, mode change) keeps the last image and
+retries every 0.5s, recreating the shared texture if the mode changed.
+
+Orientation and colour: the capture is top-row-first and GL is
+bottom-row-first, so `BlitTo` flips in the blit itself (destination y
+reversed). The bytes are sRGB-encoded already, so they're copied untouched
+into the sRGB swapchain with `GL_FRAMEBUFFER_SRGB` off — the opposite of the
+eye path, where Hydra's linear AOV is encoded on write. The pointer isn't in
+the captured image (duplication reports it separately, as the shape's
+top-left corner plus a hotspot from the shape info); it's marked with
+`DrawReticle`.
+
+The panel is an `XrCompositionLayerQuad` after the projection layer, with its
+own swapchain: the compositor samples it once (sharper than drawing it into
+the eye buffers), and it's only re-drawn when the capture reports a change —
+the compositor keeps showing the last released image otherwise. The swapchain
+is the capture halved exactly until ≤2560 wide (a clean 2×2 box filter in the
+blit), with a full mip chain regenerated after each draw; at ~20 pixels per
+degree the headset can't show more, and without mips text shimmers. It opens
+1m ahead of the head's heading and 15cm below eye level, then stays fixed in
+the room.
+
+`WGL_NV_DX_interop2` needs the monitor and the GL context on the same GPU;
+a laptop's integrated-GPU display would fail at `wglDXOpenDeviceNV`.
+
 ### Interactive Placement is resolved on the render thread
 
 Effective state = the node toggle **OR** either controller trigger held past
 half travel (`XrViewportSession::TriggerValue()`). The node only ever sends
-*configured* values; `HxrRuntime` substitutes Storm / 0s / not-frozen while
-effective-interactive is true. A trigger routed back through a Houdini cook
-would lag, which is why this isn't node-level. `updateParmsFlags` greys the
-overridden parms for the toggle only.
+*configured* values; `HxrRuntime` substitutes the Interactive Placement
+Renderer (Storm by default) / 0s / not-frozen while effective-interactive is
+true. A trigger routed back through a Houdini cook would lag, which is why
+this isn't node-level. On the node the toggle defaults **on** and Renderer
+defaults to Karma XPU: place first, then render. The parms the toggle
+overrides (Renderer, Convergence Time, Freeze Pose, Refreeze Pose) are
+deliberately **not** greyed out, so the final render can be set up while
+still placing — greying them meant turning placement off, which starts
+Karma, just to change them.
 
 The freeze capture happens on the *effective* frozen false→true transition, so
 releasing the trigger with Freeze Pose set freezes right there. The Apprentice
-cap is passed separately (`SetRendererMaxSize`) because it binds to the
-configured delegate, not to the Storm substitute.
+cap is passed per renderer (`SetRendererMaxSize` /
+`SetInteractiveRendererMaxSize`) because it binds to a delegate: each applies
+only while its own renderer is the one rendering.
 
 `Max Render Resolution` (0×0 = uncapped) shrinks the per-eye render buffer,
 preserving aspect, and the presenter's blit upscales to the swapchain. It is
@@ -356,15 +435,27 @@ Re-verify rather than trusting these if the Houdini version changes.
 | Toolchain | MSVC 2022, C++20, `/MD /bigobj /EHsc /permissive-` |
 | USD libs | `$HFS/custom/houdini/dsolib/libpxr_*.lib` |
 | OpenXR | SDK `release-1.1.63`, loader linked statically via FetchContent |
-| Plugin deploys to | `$HOUDINI_USER_PREF_DIR/dso` (here: under OneDrive) |
+| Plugin deploys to | `$HOUDINI_USER_PREF_DIR/dso` — here `C:/Users/jdive/OneDrive/Documents/houdini22.0/dso`; configure prints it |
 
 Non-obvious constraints, each of which cost real debugging time:
+
+- **Git Bash's `$HOME` redirects Houdini's user pref dir.** Houdini puts
+  `HOUDINI_USER_PREF_DIR` under `$HOME` when it's set and under Documents
+  otherwise, and `houdini_configure_target` finds it by running `hconfig`.
+  Git Bash sets `HOME` for its own shells, so builds run from it deployed the
+  plugin to `C:/Users/jdive/houdini22.0/dso`, which a normally launched
+  Houdini never searches — every in-headset test silently ran an old DLL.
+  `CMakeLists.txt` now asks `hconfig` with `HOME` unset whenever `MSYSTEM` is
+  defined. The same applies to running `hython`/`hconfig` from Git Bash:
+  they see a different pref dir from the user's Houdini.
 
 - **Hgi is OpenGL-only here.** Houdini ships `hgiGL` and `hgiInterop` but *no*
   `hgiVulkan`, so Storm produces GL textures and the OpenXR runtime must expose
   `XR_KHR_opengl_enable`. The Oculus PC runtime **does** support it (verified
   with `--probe`) alongside D3D11/D3D12/Vulkan — no SteamVR layer and no
-  `WGL_NV_DX_interop2` bridge are needed. Re-probe before believing otherwise.
+  `WGL_NV_DX_interop2` bridge are needed for the scene. Re-probe before
+  believing otherwise. (The desktop panel does use that bridge, but only to
+  get its D3D11 capture into GL.)
 - **Storm needs a GL compatibility profile.** Under a 4.5 *core* context its
   state holder and indirect-draw path throw `invalid enum` / `invalid
   operation` and the frame is garbage.
@@ -471,23 +562,26 @@ captured is forced to capture regardless of the frame-level decision.
 4. Wire `XR Output` (`hxr_output`) downstream of some LOP content, ensure it's
    on the cook path, toggle **Live**.
 
-Node parameters: `Live`, `Interactive Placement`, `Renderer`,
+Node parameters: `Live`, `Interactive Placement`,
+`Interactive Placement Renderer`, `Renderer`, `Stereo`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
 `Anchor Distance`, `Anchor Height`, `Resync Camera`, `Move Speed`,
-`Snap Turn Angle`, `Scrub Rate`, `Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
+`Snap Turn Angle`, `Scrub Rate`, `Desktop Panel Width`, `Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
 `Placement Rotate`.
 
 **Controller input** (`XrViewportSession`, one action set): trigger (float,
 both hands as subaction paths — read combined, or the left alone), right
 thumbstick (Vector2f), left thumbstick (Vector2f), right thumbstick click
-(boolean, edge via `changedSinceLastSync`), right squeeze (float), aim pose
+(boolean, edge via `changedSinceLastSync`), left menu button (boolean, edge),
+A and B (boolean, level), right squeeze (float), aim pose
 (both hands as subaction paths, one action space per hand). Actions sync at
 the top of every `RenderFrame`; the aim poses are located after
 `xrWaitFrame`. All read as zero / invalid when the session isn't focused. In
-the headset: either trigger held = interactive placement, right stick = move,
+the headset: either trigger held = interactive placement, right stick =
+dolly/strafe along/across the view, B/A = up/down,
 left stick flick = snap turn, right stick click = place the camera at the
 head, right grip held + turn = orbit about the reticle, left trigger held +
-twist = scrub the playbar.
+twist = scrub the playbar, left menu button = show/hide the desktop panel.
 
 ---
 
@@ -509,6 +603,11 @@ There is no test suite. These stand in for one:
   on the gaze ray, radius ~0.99 because Storm tessellates the sphere into
   facets that sit just inside the true surface. A point near `z = -5` would
   mean hits came back in camera space rather than stage space.
+- **`--desktop`** runs the desktop panel's capture path — duplication,
+  interop, the flipping/halving blit, the pointer mark — into an sRGB texture
+  like the panel swapchain, and writes it out. A correct image is upright,
+  with correct colours, the size `PanelSize` gives (a 3840×2400 monitor comes
+  out 1920×1200), and a cross on the mouse pointer.
 - **`--xr`** needs the Quest connected via Link/Air Link. A successful start
   prints reference space, swapchain size (2080x2096 per eye on Quest 2),
   `Session running.`, and the frame count on exit.
@@ -529,7 +628,8 @@ in the plugin.
 Built but **not yet confirmed in-headset**: head-anchored placement (replacing
 the origin-anchored version), thumbstick locomotion, thumbstick-click camera
 placement, trigger-driven interactive placement, the reticle, grip orbit, snap turn,
-left-trigger playbar scrub. (The
+left-trigger playbar scrub, the desktop panel's quad layer and toggle (its
+capture path is verified offscreen with `--desktop`). (The
 pick underneath the reticle and orbit *is* verified, offscreen, via `--pick`.)
 
 Open questions, deliberately instrumented rather than assumed:

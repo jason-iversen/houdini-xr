@@ -46,24 +46,47 @@ public:
 
     // A further cap that applies only while the *configured* delegate is the
     // one rendering -- a licence limit on that delegate (Apprentice caps Karma
-    // at 1280x720). Interactive placement runs Storm, which it doesn't bind.
+    // at 1280x720). The interactive renderer has its own, below.
     void SetRendererMaxSize(int maxWidth, int maxHeight);
 
-    // Interactive Placement: render a live Storm view regardless of what's
-    // configured, so the viewpoint can be placed at full speed. The effective
-    // state is this toggle OR a held controller trigger, resolved on the
-    // render thread each frame -- a trigger routed back through a Houdini
-    // cook would lag. Turning it off hands the exact same pose to the
-    // configured delegate: if that's frozen, the freeze captures right there.
+    // Interactive Placement: render a live view with the interactive
+    // renderer (Storm unless set otherwise) instead of what's configured, so
+    // the viewpoint can be placed at full speed. The effective state is this
+    // toggle OR a held controller trigger or grip, resolved on the render
+    // thread each frame -- a trigger routed back through a Houdini cook
+    // would lag. Turning it off hands the exact same pose to the configured
+    // delegate: if that's frozen, the freeze captures right there.
     void SetInteractive(bool on) { _interactive = on; }
 
-    // Right-thumbstick locomotion speed at full deflection, metres per
-    // second. Movement is relative to the head's horizontal heading.
+    // Whether the configured delegate renders both eyes (true) or a single
+    // view shown to both -- half the work, which is what makes a progressive
+    // delegate like Karma converge twice as fast, at the cost of depth: the
+    // image has no parallax, so the scene looks flat. The single view sits
+    // between the eyes with a field of view covering both. Interactive
+    // placement is always stereo.
+    void SetStereo(bool on) { _stereo = on; }
+
+    // The delegate interactive placement renders with. Empty means Storm.
+    void SetInteractiveRenderer(std::string const& pluginId);
+
+    // SetRendererMaxSize's counterpart, binding while the interactive
+    // renderer is the one rendering.
+    void SetInteractiveRendererMaxSize(int maxWidth, int maxHeight);
+
+    // Locomotion speed at full deflection, metres per second. Relative to
+    // the full view direction, pitch included: the right thumbstick dollies
+    // along the line of sight and strafes across it, A and B move down and
+    // up along the head's own up axis.
     void SetMoveSpeed(float metresPerSecond) { _moveSpeed = metresPerSecond; }
 
     // Left-thumbstick snap turn, degrees per flick; 0 disables it. Turns in
     // place about the head's vertical axis.
     void SetSnapTurnDegrees(float degrees) { _snapTurnDegrees = degrees; }
+
+    // The desktop panel (left menu button): the monitor Houdini is on, shown
+    // on a flat panel in front of the user. Its width in metres, at 1m away;
+    // wider is more legible but takes more of the view.
+    void SetPanelWidth(float metres) { _panelWidth = metres; }
 
     // The gaze reticle. It sits on the surface under the line of sight, and
     // marks the pivot a right-grip orbit will turn about.
@@ -148,13 +171,17 @@ private:
     std::atomic<int>    _maxRenderHeight{0};
     std::atomic<int>    _rendererMaxWidth{0};
     std::atomic<int>    _rendererMaxHeight{0};
+    std::atomic<int>    _interactiveMaxWidth{0};
+    std::atomic<int>    _interactiveMaxHeight{0};
     std::atomic<float>  _convergeSeconds{1.0f};
     std::atomic<bool>   _frozen{false};
     std::atomic<bool>   _interactive{false};
+    std::atomic<bool>   _stereo{true};
     std::atomic<bool>   _refreezeRequested{false};
     std::atomic<float>  _moveSpeed{1.5f};
     std::atomic<float>  _snapTurnDegrees{30.0f};
     std::atomic<float>  _scrubRate{24.0f};
+    std::atomic<float>  _panelWidth{1.2f};
     std::atomic<bool>   _showReticle{true};
 
     std::mutex     _stageMutex;
@@ -162,6 +189,8 @@ private:
     bool           _stageDirty = false;
     std::string    _pendingRenderer;
     bool           _rendererDirty = false;
+    std::string    _pendingInteractiveRenderer;
+    bool           _interactiveRendererDirty = false;
 
     std::mutex        _callbackMutex;
     PlacementCallback _placementCallback;

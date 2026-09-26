@@ -187,6 +187,7 @@ bool HydraRenderer::_CreateEngines(int count)
     // it was populated from the old stage and would silently ignore the new
     // one (the same _isPopulated trap as the display engines).
     _engines.clear();
+    _paused.clear();
     _pickEngine.reset();
     _probed = false;
 
@@ -234,6 +235,12 @@ void HydraRenderer::RenderEye(int view, GfMatrix4d const& viewMatrix,
         return;
     }
 
+    const size_t index = size_t(view) < _engines.size() ? size_t(view) : 0;
+    if (index < _paused.size() && _paused[index]) {
+        engine->ResumeRenderer();
+        _paused[index] = 0;
+    }
+
     engine->SetCameraState(viewMatrix, projMatrix);
 
     // Headlight at the eye, so a stage carrying no lights of its own still
@@ -277,6 +284,18 @@ void HydraRenderer::RenderEye(int view, GfMatrix4d const& viewMatrix,
                 }
             }
         }
+    }
+}
+
+void HydraRenderer::PauseView(int view)
+{
+    if (view <= 0 || size_t(view) >= _engines.size()) {
+        return;
+    }
+    _paused.resize(_engines.size(), 0);
+    UsdImagingGLEngine& engine = *_engines[size_t(view)];
+    if (!_paused[size_t(view)] && engine.IsPauseRendererSupported() && engine.PauseRenderer()) {
+        _paused[size_t(view)] = 1;
     }
 }
 

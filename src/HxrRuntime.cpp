@@ -1,5 +1,6 @@
 #include "HxrRuntime.h"
 
+#include "DesktopCapture.h"
 #include "GLContext.h"
 #include "HydraRenderer.h"
 #include "RenderCamera.h"
@@ -50,6 +51,9 @@ void HxrRuntime::Start()
         if (!_pendingRenderer.empty()) {
             _rendererDirty = true;
         }
+        if (!_pendingInteractiveRenderer.empty()) {
+            _interactiveRendererDirty = true;
+        }
     }
 
     _thread = std::thread(&HxrRuntime::ThreadMain, this);
@@ -84,6 +88,21 @@ void HxrRuntime::SetRendererPlugin(std::string const& pluginId)
         _pendingRenderer = pluginId;
         _rendererDirty   = true;
     }
+}
+
+void HxrRuntime::SetInteractiveRenderer(std::string const& pluginId)
+{
+    std::lock_guard<std::mutex> lock(_stageMutex);
+    if (pluginId != _pendingInteractiveRenderer) {
+        _pendingInteractiveRenderer = pluginId;
+        _interactiveRendererDirty   = true;
+    }
+}
+
+void HxrRuntime::SetInteractiveRendererMaxSize(int maxWidth, int maxHeight)
+{
+    _interactiveMaxWidth  = maxWidth;
+    _interactiveMaxHeight = maxHeight;
 }
 
 void HxrRuntime::SetMaxRenderSize(int maxWidth, int maxHeight)
@@ -170,6 +189,46 @@ GfMatrix4d Translation(GfVec3d const& t)
     return m;
 }
 
+// Single-eye rendering's one view, standing in for both eyes: from the
+// midpoint between them, facing the way eye 0 does (a Quest's eyes are
+// parallel), with a field of view covering both. The eyes' FOVs are
+// asymmetric -- each reaches further to its own side -- so rendering one
+// real eye and showing it to both would leave the other eye a black strip
+// along its outer edge.
+XrView CyclopeanView(XrViewportSession const& xr)
+{
+    XrView view = xr.LocatedView(0);
+    if (xr.ViewCount() < 2) {
+        return view;
+    }
+    XrView const& other = xr.LocatedView(1);
+    view.pose.position = {0.5f * (view.pose.position.x + other.pose.position.x),
+                          0.5f * (view.pose.position.y + other.pose.position.y),
+                          0.5f * (view.pose.position.z + other.pose.position.z)};
+    view.fov.angleLeft  = std::min(view.fov.angleLeft,  other.fov.angleLeft);
+    view.fov.angleRight = std::max(view.fov.angleRight, other.fov.angleRight);
+    view.fov.angleDown  = std::min(view.fov.angleDown,  other.fov.angleDown);
+    view.fov.angleUp    = std::max(view.fov.angleUp,    other.fov.angleUp);
+    return view;
+}
+
+// How much larger the cyclopean view's image plane is than one eye's, per
+// axis -- the factor to render it at, to keep one eye's pixel density. False
+// until the views have been located.
+bool MonoScale(XrViewportSession const& xr, GfVec2d* scale)
+{
+    XrFovf const& eye  = xr.LocatedView(0).fov;
+    const XrFovf  both = CyclopeanView(xr).fov;
+    const double eyeW  = std::tan(eye.angleRight) - std::tan(eye.angleLeft);
+    const double eyeH  = std::tan(eye.angleUp) - std::tan(eye.angleDown);
+    if (eyeW <= 0.0 || eyeH <= 0.0) {
+        return false;
+    }
+    *scale = GfVec2d((std::tan(both.angleRight) - std::tan(both.angleLeft)) / eyeW,
+                     (std::tan(both.angleUp) - std::tan(both.angleDown)) / eyeH);
+    return true;
+}
+
 // Largest size that fits within the cap while keeping the eye's aspect ratio;
 // scaling the two axes independently would stretch the image.
 GfVec2i FitWithin(GfVec2i const& eye, int maxWidth, int maxHeight)
@@ -246,10 +305,18 @@ void HxrRuntime::ThreadMain()
     constexpr float  kTriggerHeldThreshold = 0.5f;
 
     // What the node asked for vs what's actually running -- they differ while
-    // interactive placement (toggle or trigger) substitutes Storm.
+    // interactive placement (toggle, trigger or grip) substitutes the
+    // interactive renderer.
     std::string configuredRenderer;
+    std::string interactiveRenderer;   // empty = Storm
     std::string activeRenderer;
     bool        lastFrozen = false;
+    bool        lastMono   = false;
+    // Latched once per session rather than re-derived every frame: if the
+    // runtime's reported FOVs wobbled at all, a per-frame value could flip
+    // the render size by a pixel and restart a progressive delegate forever.
+    GfVec2d     monoScale(1.0, 1.0);
+    bool        monoScaleLatched = false;
 
     // The user's own adjustments to where the stage sits -- thumbstick
     // locomotion, snap turn and grip orbit -- accumulated as one room-space transform,
@@ -298,6 +365,19 @@ void HxrRuntime::ThreadMain()
     XrQuaternionf scrubStartOrientation{0.0f, 0.0f, 0.0f, 1.0f};
     double        scrubStartFrame = 0.0;
     double        scrubLastFrame  = 0.0;
+
+    // Desktop panel (left menu button): Houdini's interface on a flat panel,
+    // composited over the scene. Placed where the user is looking when it
+    // opens, level and just below eye height like a monitor, then fixed in
+    // the room. Capture is set up on first open rather than at session start
+    // -- most sessions never use it. Declared after the renderer so it's
+    // destroyed first, while the GL context is still current.
+    DesktopCapture desktop;
+    bool           panelOpen  = false;
+    bool           panelFresh = false;   // just opened: draw even if the desktop is unchanged
+    XrPosef        panelPose{};
+    constexpr double kPanelDistance = 1.0;    // metres
+    constexpr double kPanelDrop     = 0.15;   // metres below eye level
 
     // Reticle: a ray from the head centre along the gaze, picked against the
     // scene. Picking is a render pass, so it's throttled; the stage-space hit
@@ -357,14 +437,21 @@ void HxrRuntime::ThreadMain()
         // behind that.
         UsdStageRefPtr newStage;
         std::string    newRenderer;
+        std::string    newInteractiveRenderer;
         bool           applyStage    = false;
         bool           applyRenderer = false;
+        bool           applyInteractiveRenderer = false;
         {
             std::lock_guard<std::mutex> lock(_stageMutex);
             if (_rendererDirty) {
                 newRenderer    = _pendingRenderer;
                 applyRenderer  = true;
                 _rendererDirty = false;
+            }
+            if (_interactiveRendererDirty) {
+                newInteractiveRenderer    = _pendingInteractiveRenderer;
+                applyInteractiveRenderer  = true;
+                _interactiveRendererDirty = false;
             }
             if (_stageDirty) {
                 newStage    = _pendingStage;
@@ -376,24 +463,37 @@ void HxrRuntime::ThreadMain()
         if (applyRenderer) {
             configuredRenderer = newRenderer;
         }
+        if (applyInteractiveRenderer) {
+            interactiveRenderer = newInteractiveRenderer;
+        }
 
         // Effective state: the toggle, a trigger held past half travel, or an
         // orbit in progress. Resolved here rather than in the node so a
         // controller press takes effect this frame, not after a cook. Grip
         // counts for the same reason the trigger does: orbiting changes the
         // view every frame, which would restart a progressive delegate
-        // continuously -- so it's shown live in Storm, and releasing hands
-        // back to the configured delegate (freezing there if Freeze Pose is on).
+        // continuously -- so it's shown live in the interactive renderer, and
+        // releasing hands back to the configured delegate (freezing there if
+        // Freeze Pose is on).
         const bool gripHeld = xr.GripValue() > kGripHeldThreshold;
         const bool interactive =
             _interactive.load() || xr.TriggerValue() > kTriggerHeldThreshold || gripHeld;
         const bool  frozen          = !interactive && _frozen.load();
         const float convergeSeconds = interactive ? 0.0f : _convergeSeconds.load();
 
+        // Single-eye rendering is for the configured delegate only:
+        // interactive placement is always stereo -- it's cheap there, and
+        // depth matters most while placing.
+        const bool mono         = !interactive && !_stereo.load() && viewCount > 1;
+        const bool monoSwitched = mono != lastMono;
+        lastMono = mono;
+
         // Delegate first, so a stage arriving in the same frame builds its
         // engine once, with the right delegate, rather than twice.
         const std::string wantRenderer =
-            interactive ? HydraRenderer::DefaultRendererId().GetString() : configuredRenderer;
+            !interactive                ? configuredRenderer
+            : interactiveRenderer.empty() ? HydraRenderer::DefaultRendererId().GetString()
+                                          : interactiveRenderer;
         const bool rendererSwitched = wantRenderer != activeRenderer;
         if (rendererSwitched) {
             renderer.SetRendererPlugin(TfToken(wantRenderer));
@@ -429,6 +529,16 @@ void HxrRuntime::ThreadMain()
                 kMaxFrameDt, std::chrono::duration<double>(frameNow - lastFrameTime).count());
             lastFrameTime = frameNow;
 
+            // The head's own axes, pitch and all: forward/back dollies along
+            // the line of sight, left/right strafes across it, and A/B move
+            // along the head's up. Unlike the anchor, which keeps the floor
+            // level, this is free flight -- look down and push forward to
+            // descend. Rigid pose, so the axes are unit length.
+            const GfVec3d forward = liveHeadToWorld.TransformDir(GfVec3d(0.0, 0.0, -1.0));
+            const GfVec3d right   = liveHeadToWorld.TransformDir(GfVec3d(1.0, 0.0, 0.0));
+            const GfVec3d up      = liveHeadToWorld.TransformDir(GfVec3d(0.0, 1.0, 0.0));
+
+            GfVec3d velocity(0.0);
             const XrVector2f stick = xr.RightThumbstick();
             GfVec2d deflection(stick.x, stick.y);
             const double magnitude = deflection.GetLength();
@@ -436,12 +546,12 @@ void HxrRuntime::ThreadMain()
                 // Rescale so movement starts from zero at the deadzone edge
                 // rather than jumping to 15% speed.
                 deflection *= (magnitude - kStickDeadzone) / ((1.0 - kStickDeadzone) * magnitude);
+                velocity += forward * deflection[1] + right * deflection[0];
+            }
+            velocity += up * (double(xr.ButtonB()) - double(xr.ButtonA()));
 
-                const GfVec3d forward = liveHead.forward;
-                const GfVec3d right(-forward[2], 0.0, forward[0]);
-                const GfVec3d step = (forward * deflection[1] + right * deflection[0]) *
-                                     double(_moveSpeed.load()) * dt;
-                userXform = userXform * Translation(-step);
+            if (haveLiveHead && velocity != GfVec3d(0.0)) {
+                userXform = userXform * Translation(-velocity * double(_moveSpeed.load()) * dt);
             }
         }
 
@@ -492,6 +602,45 @@ void HxrRuntime::ThreadMain()
             }
         }
 
+        // --- Desktop panel ---
+        if (xr.LeftMenuPressed() && haveLiveHead) {
+            panelOpen = !panelOpen;
+            if (panelOpen && !desktop.IsValid() && !desktop.Init()) {
+                panelOpen = false;   // DesktopCapture has said why, on stderr
+            }
+            if (panelOpen) {
+                const GfVec3d forward = Horizontal(headForward);
+                const GfVec3d centre  = headCentre + forward * kPanelDistance -
+                                        GfVec3d(0.0, kPanelDrop, 0.0);
+                // Facing the user: the +Y rotation taking -Z to `forward`
+                // (the quad's image faces its local +Z).
+                const double yaw = std::atan2(-forward[0], -forward[2]);
+                panelPose.position    = {float(centre[0]), float(centre[1]), float(centre[2])};
+                panelPose.orientation = {0.0f, float(std::sin(0.5 * yaw)), 0.0f,
+                                         float(std::cos(0.5 * yaw))};
+                panelFresh = true;
+            }
+        }
+        {
+            XrViewportSession::Panel panel;
+            if (panelOpen) {
+                const bool changed = desktop.Update() || panelFresh;
+                panelFresh = false;
+
+                int width  = 0;
+                int height = 0;
+                desktop.PanelSize(&width, &height);
+                panel.visible     = true;
+                panel.width       = uint32_t(width);
+                panel.height      = uint32_t(height);
+                panel.pose        = panelPose;
+                panel.widthMetres = _panelWidth.load();
+                panel.changed     = changed;
+                panel.draw        = [&desktop](int w, int h) { desktop.BlitTo(w, h); };
+            }
+            xr.SetPanel(std::move(panel));
+        }
+
         // --- Grip orbit ---
         XrPosef    aimPose{};
         const bool aimValid = xr.RightAimPose(&aimPose);
@@ -524,6 +673,9 @@ void HxrRuntime::ThreadMain()
             userXform   = userXform * orbitLive;   // commit
             orbitLive   = GfMatrix4d(1.0);
             gripWasHeld = false;
+            // The reticle was pinned to the pivot; re-pick the gaze now
+            // rather than show the pre-orbit hit for up to a pick interval.
+            lastPickTime = std::chrono::steady_clock::now() - std::chrono::seconds(1);
         }
 
         // After the commit, so the release frame doesn't flash the pre-orbit
@@ -531,14 +683,22 @@ void HxrRuntime::ThreadMain()
         GfMatrix4d worldFromStage = base * userXform * orbitLive;
 
         // --- Reticle ---
+        // Pinned to the pivot while orbiting, rather than following the gaze:
+        // the pivot is the point everything turns about, and a reticle that
+        // wandered off it as the head moved was misleading. The pivot is
+        // fixed in room space by construction (orbitLive rotates about it),
+        // so no pick is needed until release.
         const bool showReticle = _showReticle.load() && haveLiveHead && anchorLatched;
-        if (showReticle) {
+        if (showReticle && !gripWasHeld) {
             const auto pickNow = std::chrono::steady_clock::now();
             if (std::chrono::duration<double>(pickNow - lastPickTime).count() >= kPickInterval) {
                 lastPickTime     = pickNow;
                 reticleOnSurface = pickAlongGaze(worldFromStage, &reticleStage);
             }
         }
+        const GfVec3d reticleRoom = gripWasHeld      ? orbitPivotRoom
+                                    : reticleOnSurface ? worldFromStage.Transform(reticleStage)
+                                                       : headCentre + headForward * kReticleMissDistance;
 
         // Thumbstick click: report where the head is, in stage space, to
         // whoever wants to place a camera there. Uses the previous frame's
@@ -597,16 +757,33 @@ void HxrRuntime::ThreadMain()
         const double timeCode = _timeCode.load();
 
         // Cheap to re-derive every frame (a few atomics), and SetRenderSize is
-        // a no-op when unchanged -- so the caps can be adjusted live. The
-        // renderer-specific cap only binds when the configured delegate is
-        // the one rendering.
-        GfVec2i renderSize = FitWithin(eyeSize, _maxRenderWidth.load(), _maxRenderHeight.load());
-        if (!interactive) {
-            renderSize = FitWithin(renderSize, _rendererMaxWidth.load(), _rendererMaxHeight.load());
+        // a no-op when unchanged -- so the caps can be adjusted live. Each
+        // renderer-specific cap binds only while its delegate is rendering.
+        GfVec2i renderBase = eyeSize;
+        if (mono) {
+            // From an earlier frame's views: this frame's aren't located
+            // until RenderFrame, and the render size has to be set before it.
+            if (!monoScaleLatched) {
+                monoScaleLatched = MonoScale(xr, &monoScale);
+            }
+            renderBase = GfVec2i(int(eyeSize[0] * monoScale[0] + 0.5),
+                                 int(eyeSize[1] * monoScale[1] + 0.5));
         }
+        GfVec2i renderSize = FitWithin(renderBase, _maxRenderWidth.load(), _maxRenderHeight.load());
+        renderSize = interactive
+                         ? FitWithin(renderSize, _interactiveMaxWidth.load(),
+                                     _interactiveMaxHeight.load())
+                         : FitWithin(renderSize, _rendererMaxWidth.load(),
+                                     _rendererMaxHeight.load());
         renderer.SetRenderSize(renderSize);
 
-        const bool contentChanged = applyStage || rendererSwitched ||
+        if (monoSwitched && mono) {
+            for (int i = 1; i < viewCount; ++i) {
+                renderer.PauseView(i);   // resumed by its next RenderEye
+            }
+        }
+
+        const bool contentChanged = applyStage || rendererSwitched || monoSwitched ||
                                     timeCode != lastTimeCode ||
                                     worldFromStage != lastWorldFromStage ||
                                     renderSize != lastRenderSize;
@@ -636,11 +813,13 @@ void HxrRuntime::ThreadMain()
         // or the views aren't valid yet, both routine at session start), and
         // recording "held" before the pose was actually taken is how a zero
         // pose ends up in xrEndFrame.
-        bool recapture = _refreezeRequested.exchange(false) || froze;
+        // Switching between stereo and single-eye re-captures too: the held
+        // poses are per-eye in one and the cyclopean view in the other.
+        bool recapture = _refreezeRequested.exchange(false) || froze || monoSwitched;
         if (!recapture && !frozen) {
             bool allConverged = true;
-            for (HeldEye const& eye : held) {
-                allConverged = allConverged && eye.converged;
+            for (size_t i = 0; i < (mono ? size_t(1) : held.size()); ++i) {
+                allConverged = allConverged && held[i].converged;
             }
             const double heldFor =
                 std::chrono::duration<double>(now - heldSince).count();
@@ -649,7 +828,11 @@ void HxrRuntime::ThreadMain()
         }
 
         auto renderEye = [&](uint32_t index, XrView const& current) {
-            HeldEye& eye = held[index];
+            // Single-eye: every eye after the first shows eye 0's image, with
+            // eye 0's (cyclopean) pose and FOV -- the compositor reprojects
+            // it to each eye's actual pose.
+            const bool mirror = mono && index > 0;
+            HeldEye&   eye    = held[mirror ? 0 : index];
 
             if (index < 2) {
                 eyePos[index] = XrPoseToMatrix(current.pose).ExtractTranslation();
@@ -678,11 +861,12 @@ void HxrRuntime::ThreadMain()
 
             // An eye that has never captured a pose has nothing valid to
             // submit, whatever the frame-level decision was.
-            if (recapture || !eye.held) {
-                eye.pose      = current.pose;
-                eye.fov       = current.fov;
-                eye.view      = XrPoseToViewMatrix(current.pose);
-                eye.proj      = XrFovToProjectionMatrix(current.fov, kNearPlane, kFarPlane);
+            if (!mirror && (recapture || !eye.held)) {
+                const XrView source = mono ? CyclopeanView(xr) : current;
+                eye.pose      = source.pose;
+                eye.fov       = source.fov;
+                eye.view      = XrPoseToViewMatrix(source.pose);
+                eye.proj      = XrFovToProjectionMatrix(source.fov, kNearPlane, kFarPlane);
                 eye.held      = true;
                 eye.converged = false;
                 heldSince     = now;
@@ -690,7 +874,7 @@ void HxrRuntime::ThreadMain()
 
             // A frozen, converged eye has nothing left to render: keep
             // presenting the frame it already has.
-            if (!(frozen && eye.converged)) {
+            if (!mirror && !(frozen && eye.converged)) {
                 renderer.RenderEye(int(index), worldFromStage * eye.view, eye.proj, timeCode);
                 eye.converged = renderer.IsConverged(int(index));
 
@@ -714,11 +898,9 @@ void HxrRuntime::ThreadMain()
             // compositor then reprojects both together to the live head pose.
             XrViewportSession::EyeImage image = eye.image;
             if (showReticle) {
-                const GfVec3d room = reticleOnSurface
-                                         ? worldFromStage.Transform(reticleStage)
-                                         : headCentre + headForward * kReticleMissDistance;
                 const GfVec4d clip =
-                    GfVec4d(room[0], room[1], room[2], 1.0) * (eye.view * eye.proj);
+                    GfVec4d(reticleRoom[0], reticleRoom[1], reticleRoom[2], 1.0) *
+                    (eye.view * eye.proj);
                 if (clip[3] > 1e-6) {   // in front of this eye
                     image.reticleVisible = true;
                     image.reticleNdcX    = float(clip[0] / clip[3]);

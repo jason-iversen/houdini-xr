@@ -27,8 +27,9 @@ Working and validated on hardware:
 - Playbar time sync, so scrubbing and playback are reflected in the headset
 - Initial view positioned from a RenderSettings camera when one is authored
 - Upstream edits reach the headset automatically, without restarting the session
-- Selectable render delegate — Storm by default, with Karma CPU/XPU and any
-  other Hydra delegate Houdini registers available from a menu
+- Selectable render delegate — Karma XPU by default on the node, with Storm,
+  Karma CPU and any other Hydra delegate Houdini registers available from a
+  menu
 
 This is a working prototype, not a finished tool. There's no in-headset UI —
 everything is driven by the node's parameters and the controllers.
@@ -48,17 +49,25 @@ like a picture fixed in space rather than one stuck to your face.
   "frozen-pose" workflow. Place the view with your head, freeze, wait, look at
   the result. **Refreeze Pose** re-captures from your current position.
 
-The practical way to work with Karma: set Renderer to Karma and Freeze Pose
-on. Then **hold either controller trigger** — you get a live Storm view to
-walk around and line up the shot in. Release the trigger, and Karma takes
-over frozen at exactly that pose and starts converging. The **Interactive
-Placement** toggle does the same thing from the node if you'd rather not hold
-the trigger.
+The practical way to work with Karma is the node's default setup:
+**Interactive Placement** is on, so you start in a live Storm view to walk
+around and line up the shot in. Turn it off, and Karma takes over at exactly
+that pose (frozen there, if Freeze Pose is on) and starts converging. From
+then on, **hold either controller trigger** to drop back into the live view
+for as long as it's held — release, and Karma picks up from the new pose.
+The live view's renderer is **Interactive Placement Renderer**, Storm by
+default.
 
 Storm is unaffected by either: it converges in one pass, so it re-captures
 every frame and stays a normal live viewport. Lowering **Max Render
 Resolution** makes a big difference for Karma — 640×640 upscaled is far more
 responsive than the headset's native 2080×2096 per eye.
+
+**Stereo** is off by default: the Renderer draws a single view, from between
+your eyes and wide enough to cover both, and shows it to both eyes. That's
+half the work, so Karma converges twice as fast — but the image has no depth,
+so the scene looks flat, like a very large photo. Turn Stereo on for a true
+3D render at twice the cost. The live placement view is always stereo.
 
 Running Houdini Apprentice? Karma there is limited to 1280×720, and the node
 applies that cap automatically when a Karma delegate is selected (you'll see
@@ -113,9 +122,11 @@ restarting Houdini each time.
 ./scripts/run.cmd --xr --frames 600    # ...for a fixed number of frames
 ```
 
-Options: `--renderer PluginId`, `--max-res WxH`, `--converge S`, `--frozen`,
-`--pick`, `--reticle`, `--size WxH`, `--out image.bmp`, `--dist M`,
-`--height M`. `--reticle` draws the headset's reticle into the image.
+Options: `--renderer PluginId`, `--max-res WxH`, `--converge S`, `--frozen`, `--mono`,
+`--pick`, `--reticle`, `--desktop`, `--size WxH`, `--out image.bmp`,
+`--dist M`, `--height M`. `--reticle` draws the headset's reticle into the
+image; `--desktop` writes out your monitor exactly as the headset's desktop
+panel would show it.
 
 With no `--stage`, it renders a built-in sphere — enough to confirm the whole
 path works end to end.
@@ -136,8 +147,10 @@ your setup.
 | Parameter | Effect |
 |---|---|
 | **Live** | Starts/stops the XR session |
-| **Interactive Placement** | Overrides to a live Storm view for placing the viewpoint; turn off to hand over to the configured delegate at that exact pose. **Holding either controller trigger does the same thing** for as long as it's held |
-| **Renderer** | Which Hydra delegate renders — Storm, Karma CPU/XPU, etc. |
+| **Interactive Placement** | On by default. Overrides to a live view in the Interactive Placement Renderer for placing the viewpoint; turn off to hand over to Renderer at that exact pose. **Holding either controller trigger does the same thing** for as long as it's held |
+| **Interactive Placement Renderer** | What the live placement view renders with — Storm by default. Pick something that renders a clean frame in one pass |
+| **Renderer** | Which Hydra delegate renders once placement is off — Karma XPU by default; Storm, Karma CPU, etc. |
+| **Stereo** | Off by default: Renderer draws one view shown to both eyes — twice as fast, but flat. On: a true stereo render. The placement view is always stereo |
 | **Max Render Resolution** | Caps the per-eye render size (0×0 = uncapped); upscaled to the headset |
 | **Convergence Time** | Seconds to hold the pose so a progressive renderer can accumulate |
 | **Freeze Pose** | Hold indefinitely and render to full convergence |
@@ -145,9 +158,10 @@ your setup.
 | **Anchor Distance** | How far in front of you the stage sits (metres) |
 | **Anchor Height** | How high the stage sits (metres) |
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
-| **Move Speed** | Thumbstick locomotion speed, metres per second |
+| **Move Speed** | Movement speed (thumbstick and A/B), metres per second |
 | **Snap Turn Angle** | Degrees per left-thumbstick flick; 0 turns snap turn off |
 | **Scrub Rate** | Frames per quarter turn of the wrist when scrubbing the playbar; 0 turns scrubbing off |
+| **Desktop Panel Width** | Width of the in-headset desktop panel, in metres at 1m away. Wider is easier to read |
 | **Show Reticle** | The gaze crosshair; turn off for a clean look at a converged frame |
 | **Apply Camera Placement** | Author the RenderSettings camera from the placement keys below |
 | **Placement Translate / Rotate** | The placed camera's pose in stage space — keyed by the thumbstick click |
@@ -156,33 +170,53 @@ your setup.
 
 | Input | Effect |
 |---|---|
-| Either trigger (held) | Interactive Placement while held — live Storm view |
-| Right thumbstick | Move: forward/back and strafe, relative to where you're looking |
+| Either trigger (held) | Interactive Placement while held — live view in the Interactive Placement Renderer |
+| Right thumbstick forward/back | **Dolly** in and out along the line of sight |
+| Right thumbstick left/right | **Strafe** across the line of sight |
+| B / A (held) | Move **up / down**, relative to where you're looking |
 | Left thumbstick flick left/right | **Snap turn** by the Snap Turn Angle |
 | Right thumbstick click | **Place the camera** where your head is, at the current frame |
 | Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle |
 | Left trigger (held) + twist the controller | **Scrub the playbar** — clockwise forward, like a jog wheel |
+| Left menu button | **Show/hide the desktop** — Houdini's interface on a panel in front of you |
 
 **The reticle** is the crosshair in the centre of your view. It sits *on* the
 surface you're looking at (not floating in front of it), which is also the
 point a grip orbit turns around. Hold the right grip and turn the controller —
-the scene turns with your hand, pivoting on that point. Release, and the new
-view stays. Like the trigger, holding the grip shows a live Storm view, so
-orbiting stays smooth even with Karma selected; releasing hands back to your
-renderer.
+the scene turns with your hand, pivoting on that point, and the reticle stays
+pinned to it while you orbit. Release, and the new view stays. Like the
+trigger, holding the grip shows the live placement view, so orbiting stays
+smooth even with Karma selected; releasing hands back to your renderer.
 
 **Scrubbing the playbar.** Hold the left trigger and twist your wrist, as if
 turning a dial: clockwise steps forward, anticlockwise back, 24 frames per
 quarter turn by default. It's measured from where your hand was when you
 pulled the trigger, so to go further, release, twist back and grab again. If
 the playbar is playing, the first step of a scrub stops it. Since the left
-trigger is also an Interactive Placement trigger, you see a live Storm view
-while scrubbing — a frame change would restart Karma every time — and your
+trigger is also an Interactive Placement trigger, you see the live placement
+view while scrubbing — a frame change would restart Karma every time — and your
 renderer takes over again when you let go. How quickly the headset follows
 depends on how fast your scene cooks: if it can't keep up, frames are skipped
 rather than queued, so the playbar stops when your hand does.
 
-Moving with the thumbstick is smooth locomotion — it doesn't change your
+**Houdini's interface in the headset.** Press the left menu button (☰) and
+the monitor Houdini is on appears on a panel about a metre in front of you,
+over the scene; press it again to hide it. Use your mouse and keyboard as
+normal — Houdini still has focus, so the cursor moves on the panel. Tweak a
+parameter and the scene around the panel updates, without taking the headset
+off. The panel stays where it opened, like a monitor in the room; close and
+reopen it to bring it back in front of you.
+
+Text is the limiting factor: a Quest 2 shows roughly a third to half the
+detail of a monitor at a desk. If it's hard to read, widen **Desktop Panel
+Width**, raise Houdini's UI scale, or both. The whole monitor is shown rather
+than just Houdini's window, because Houdini's menus are separate windows that
+would otherwise be missing. The monitor must be driven by the same GPU as
+Houdini (true of any desktop PC with one graphics card).
+
+Movement follows your full line of sight, pitch included, so it's free
+flight: look down and push forward to descend, and "up" on B is the top of
+your head's direction, not the room's. Moving is smooth locomotion — it doesn't change your
 tracked position, it moves the scene around you. Snap turn is the comfortable
 way to turn around without turning your body: a quick flick of the left
 stick turns you in place by a fixed step, rather than rotating smoothly (which

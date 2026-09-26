@@ -59,9 +59,38 @@ public:
 
     bool RenderFrame(RenderEyeFn const& renderEye);
 
+    // A flat panel composited over the scene as its own quad layer -- the
+    // desktop mirror. World-locked in the reference space. Set before
+    // RenderFrame; `draw` is called during it, only when `changed` (or the
+    // panel's swapchain is new), to fill the bound draw framebuffer. An
+    // unchanged panel costs nothing: the compositor keeps showing the last
+    // image released into its swapchain.
+    struct Panel
+    {
+        bool     visible = false;
+        uint32_t width   = 0;       // image size in pixels, for the swapchain
+        uint32_t height  = 0;
+        XrPosef  pose{};            // centre; the image faces +Z
+        float    widthMetres = 1.0f;
+        bool     changed = false;
+        std::function<void(int width, int height)> draw;
+    };
+    void SetPanel(Panel panel)
+    {
+        // Latched until actually drawn: a change on a frame the runtime says
+        // not to render must not be lost.
+        _panelDirty = _panelDirty || panel.changed;
+        _panel      = std::move(panel);
+    }
+
     uint32_t EyeWidth()  const { return _eyeWidth; }
     uint32_t EyeHeight() const { return _eyeHeight; }
     uint32_t ViewCount() const { return uint32_t(_viewConfigs.size()); }
+
+    // The views as most recently located -- during a RenderFrame callback,
+    // this frame's, for every eye (all are located before the first
+    // callback). Zeroed until the first frame locates them.
+    XrView const& LocatedView(uint32_t view) const { return _views[view]; }
 
     // Either hand's trigger, 0..1, as of the most recent RenderFrame. One
     // action bound to both hands: OpenXR resolves that to whichever is pulled
@@ -79,6 +108,14 @@ public:
     // Left-hand thumbstick, same convention. Only its x axis is used (snap
     // turn); the right stick already has move and strafe.
     XrVector2f LeftThumbstick() const { return _leftThumbstick; }
+
+    // Right controller's A and B buttons, held (level, not edge): vertical
+    // movement.
+    bool ButtonA() const { return _buttonA; }
+    bool ButtonB() const { return _buttonB; }
+
+    // True only on the frame the left menu button is pressed.
+    bool LeftMenuPressed() const { return _leftMenuPressed; }
 
     // True only on the frame the right thumbstick is clicked down.
     bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
@@ -126,6 +163,9 @@ private:
     XrAction    _thumbstickAction = XR_NULL_HANDLE;
     XrAction    _turnAction       = XR_NULL_HANDLE;
     XrAction    _thumbClickAction = XR_NULL_HANDLE;
+    XrAction    _menuAction       = XR_NULL_HANDLE;
+    XrAction    _buttonAAction    = XR_NULL_HANDLE;
+    XrAction    _buttonBAction    = XR_NULL_HANDLE;
     XrAction    _gripAction       = XR_NULL_HANDLE;
     XrAction    _aimPoseAction    = XR_NULL_HANDLE;
     XrSpace     _rightAimSpace    = XR_NULL_HANDLE;
@@ -138,6 +178,11 @@ private:
     XrVector2f  _rightThumbstick{0.0f, 0.0f};
     XrVector2f  _leftThumbstick{0.0f, 0.0f};
     bool        _rightThumbstickPressed = false;
+    bool        _leftMenuPressed = false;
+    bool        _buttonA = false;
+    bool        _buttonB = false;
+    Panel       _panel;
+    bool        _panelDirty = false;
     XrPosef     _rightAimPose{};
     bool        _rightAimValid = false;
     XrPosef     _leftAimPose{};

@@ -135,7 +135,9 @@ newLopOperator(OP_OperatorTable* table)
 
 static PRM_Name theLiveName("live", "Live");
 static PRM_Name theInteractiveName("interactive", "Interactive Placement");
+static PRM_Name theInteractiveRendererName("interactiverenderer", "Interactive Placement Renderer");
 static PRM_Name theRendererName("renderer", "Renderer");
+static PRM_Name theStereoName("stereo", "Stereo");
 static PRM_Name theMaxResName("maxres", "Max Render Resolution");
 static PRM_Name theConvergeName("converge", "Convergence Time");
 static PRM_Name theFrozenName("frozen", "Freeze Pose");
@@ -146,22 +148,26 @@ static PRM_Name theResyncName("resync", "Resync Camera");
 static PRM_Name theMoveSpeedName("movespeed", "Move Speed");
 static PRM_Name theSnapTurnName("snapturn", "Snap Turn Angle");
 static PRM_Name theScrubRateName("scrubrate", "Scrub Rate");
+static PRM_Name thePanelWidthName("panelwidth", "Desktop Panel Width");
 static PRM_Name theShowReticleName("showreticle", "Show Reticle");
 static PRM_Name theApplyPlacementName("applyplacement", "Apply Camera Placement");
 static PRM_Name thePlaceTranslateName("pt", "Placement Translate");
 static PRM_Name thePlaceRotateName("pr", "Placement Rotate");
 
-static PRM_Default theRendererDefault(0, "HdStormRendererPlugin");
+static PRM_Default theRendererDefault(0, "BRAY_HdKarmaXPU");
+static PRM_Default theInteractiveRendererDefault(0, "HdStormRendererPlugin");
 static PRM_Default theConvergeDefault(1.0);
 static PRM_Default theDistDefault(2.0);
 static PRM_Default theHeightDefault(1.2);
 static PRM_Default theMoveSpeedDefault(1.5);
 static PRM_Default theSnapTurnDefault(30.0);
 static PRM_Default theScrubRateDefault(24.0);
+static PRM_Default thePanelWidthDefault(1.2);
 
 static PRM_Range theConvergeRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 10.0);
 static PRM_Range theSnapTurnRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_RESTRICTED, 180.0);
 static PRM_Range theScrubRateRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 96.0);
+static PRM_Range thePanelWidthRange(PRM_RANGE_RESTRICTED, 0.1, PRM_RANGE_UI, 3.0);
 
 // Populated each time the menu opens: every delegate in the Hydra registry,
 // filtered and labelled the way Houdini's own viewport menu does it, via the
@@ -213,11 +219,20 @@ static PRM_ChoiceList theRendererMenu(PRM_CHOICELIST_SINGLE, buildRendererMenu);
 PRM_Template
 LOP_XrOutput::myTemplateList[] = {
     PRM_Template(PRM_TOGGLE, 1, &theLiveName, PRMzeroDefaults),
-    // Overrides Renderer -> Storm, Convergence Time -> 0, Freeze Pose -> off,
-    // so the view can be placed interactively; turning it off hands over to
-    // the configured delegate and settings at that exact pose.
-    PRM_Template(PRM_TOGGLE, 1, &theInteractiveName, PRMzeroDefaults),
+    // Overrides Renderer -> Interactive Placement Renderer, Convergence Time
+    // -> 0, Freeze Pose -> off, so the view can be placed interactively;
+    // turning it off hands over to the configured delegate and settings at
+    // that exact pose. On by default: place first, then render.
+    PRM_Template(PRM_TOGGLE, 1, &theInteractiveName, PRMoneDefaults),
+    // What interactive placement renders with -- the toggle, a held trigger,
+    // or a held grip. Something that renders a clean frame in one pass.
+    PRM_Template(PRM_STRING, 1, &theInteractiveRendererName, &theInteractiveRendererDefault,
+                 &theRendererMenu),
     PRM_Template(PRM_STRING, 1, &theRendererName, &theRendererDefault, &theRendererMenu),
+    // Renderer draws both eyes, or (off) one view from between them shown to
+    // both: half the work, so a progressive delegate converges twice as
+    // fast, but with no depth. Interactive placement is always stereo.
+    PRM_Template(PRM_TOGGLE, 1, &theStereoName, PRMzeroDefaults),
     // 0 x 0 = uncapped. Set to your licence's render limit (Apprentice is
     // 1280 x 720), or lower still to make a progressive delegate responsive.
     PRM_Template(PRM_INT,    2, &theMaxResName, PRMzeroDefaults),
@@ -240,6 +255,9 @@ LOP_XrOutput::myTemplateList[] = {
     // Left trigger + twist scrubs the playbar: frames per quarter turn of
     // the wrist, clockwise forward. 0 turns scrubbing off.
     PRM_Template(PRM_FLT,    1, &theScrubRateName, &theScrubRateDefault, 0, &theScrubRateRange),
+    // The left menu button shows the monitor Houdini is on, on a panel 1m
+    // away; this is its width in metres. Wider is easier to read.
+    PRM_Template(PRM_FLT,    1, &thePanelWidthName, &thePanelWidthDefault, 0, &thePanelWidthRange),
     // Gaze reticle; also marks the pivot a right-grip orbit turns about.
     // Worth turning off for a clean look at a converged frame.
     PRM_Template(PRM_TOGGLE, 1, &theShowReticleName, PRMoneDefaults),
@@ -382,18 +400,27 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     const std::string rendererId = rendererParm.toStdString();
     myRuntime->SetRendererPlugin(rendererId);
     myRuntime->SetInteractive(evalInt(theInteractiveName, 0, t) != 0);
+    myRuntime->SetStereo(evalInt(theStereoName, 0, t) != 0);
+
+    UT_String interactiveRendererParm;
+    evalString(interactiveRendererParm, theInteractiveRendererName, 0, t);
+    const std::string interactiveRendererId = interactiveRendererParm.toStdString();
+    myRuntime->SetInteractiveRenderer(interactiveRendererId);
 
     myRuntime->SetMaxRenderSize(int(evalInt(theMaxResName, 0, t)),
                                 int(evalInt(theMaxResName, 1, t)));
 
-    // The licence cap is tied to the configured delegate, so it's passed
-    // separately: while Storm is substituted for placement it doesn't apply.
-    if (RunningAsApprentice() && IsKarma(rendererId)) {
-        myRuntime->SetRendererMaxSize(kApprenticeKarmaMaxWidth, kApprenticeKarmaMaxHeight);
+    // The licence cap is tied to a delegate, so each renderer gets its own:
+    // it binds only while that one is rendering.
+    const bool capRenderer    = RunningAsApprentice() && IsKarma(rendererId);
+    const bool capInteractive = RunningAsApprentice() && IsKarma(interactiveRendererId);
+    myRuntime->SetRendererMaxSize(capRenderer ? kApprenticeKarmaMaxWidth : 0,
+                                  capRenderer ? kApprenticeKarmaMaxHeight : 0);
+    myRuntime->SetInteractiveRendererMaxSize(capInteractive ? kApprenticeKarmaMaxWidth : 0,
+                                             capInteractive ? kApprenticeKarmaMaxHeight : 0);
+    if (capRenderer || capInteractive) {
         addWarning(LOP_MESSAGE, "Apprentice licence: Karma render capped at 1280 x 720 "
                                 "per eye and upscaled to the headset");
-    } else {
-        myRuntime->SetRendererMaxSize(0, 0);
     }
 
     myRuntime->SetConvergeSeconds(float(evalFloat(theConvergeName, 0, t)));
@@ -401,6 +428,7 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     myRuntime->SetMoveSpeed(float(evalFloat(theMoveSpeedName, 0, t)));
     myRuntime->SetSnapTurnDegrees(float(evalFloat(theSnapTurnName, 0, t)));
     myRuntime->SetScrubRate(float(evalFloat(theScrubRateName, 0, t)));
+    myRuntime->SetPanelWidth(float(evalFloat(thePanelWidthName, 0, t)));
     myRuntime->SetShowReticle(evalInt(theShowReticleName, 0, t) != 0);
 
     // HUSD authors USD time samples using the Houdini frame number (not
@@ -530,22 +558,6 @@ LOP_XrOutput::applyPlacement(HxrRuntime::CameraPlacement const& placement)
 
     myOutputDirty = true;
     forceRecook();
-}
-
-bool
-LOP_XrOutput::updateParmsFlags()
-{
-    bool changed = LOP_Node::updateParmsFlags();
-
-    // Grey out what Interactive Placement is overriding, so the UI shows
-    // what's actually in effect rather than what's merely configured.
-    const bool configurable = evalInt(theInteractiveName, 0, 0.0) == 0;
-    changed |= enableParm(theRendererName.getToken(), configurable);
-    changed |= enableParm(theConvergeName.getToken(), configurable);
-    changed |= enableParm(theFrozenName.getToken(),   configurable);
-    changed |= enableParm(theRefreezeName.getToken(), configurable);
-
-    return changed;
 }
 
 /*static*/ int

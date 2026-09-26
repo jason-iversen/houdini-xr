@@ -97,11 +97,13 @@ add_library(hxr_core OBJECT
   src/XrSession.cpp
   src/HxrRuntime.cpp
   src/RenderCamera.cpp
-  src/Reticle.cpp)
+  src/Reticle.cpp
+  src/DesktopCapture.cpp)
 target_include_directories(hxr_core PUBLIC "${_pxr_inc}" "${_py_inc}" src)
 target_compile_options(hxr_core PRIVATE ${_hxr_compile_options})
 target_compile_definitions(hxr_core PRIVATE ${_hxr_defines})
-target_link_libraries(hxr_core PUBLIC openxr_loader)
+# d3d11/dxgi: the desktop panel captures with DXGI Desktop Duplication.
+target_link_libraries(hxr_core PUBLIC openxr_loader d3d11 dxgi)
 
 # Standalone desktop test harness -- no Houdini process required. This is
 # what Milestone 1 was validated against, and stays useful for iterating on
@@ -129,7 +131,27 @@ target_link_libraries(LOP_HoudiniXR PRIVATE
 # houdini_configure_target() with no INSTDIR deploys straight into
 # $HOUDINI_USER_PREF_DIR/dso, so a build alone makes the node available on
 # Houdini's next restart -- no manual copy or HOUDINI_DSO_PATH needed.
-houdini_configure_target(LOP_HoudiniXR)
+#
+# Except from Git Bash. It finds that directory by asking hconfig, and Houdini
+# puts it under $HOME when HOME is set, under Documents otherwise. Git Bash
+# (MSYS) sets HOME for its own shells -- a normally launched Houdini never
+# sees it -- so the plugin deployed to a directory Houdini doesn't search. Ask
+# hconfig the same question without that HOME.
+if(DEFINED ENV{MSYSTEM})
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env --unset=HOME "${HFS}/bin/hconfig.exe"
+    OUTPUT_VARIABLE _hconfig_out
+    RESULT_VARIABLE _hconfig_status)
+  string(REGEX MATCH "HOUDINI_USER_PREF_DIR := '([^\n]*)'" _ "${_hconfig_out}")
+  if(NOT _hconfig_status EQUAL 0 OR NOT CMAKE_MATCH_1)
+    message(FATAL_ERROR "Could not get HOUDINI_USER_PREF_DIR from hconfig")
+  endif()
+  houdini_configure_target(LOP_HoudiniXR INSTDIR "${CMAKE_MATCH_1}/dso")
+else()
+  houdini_configure_target(LOP_HoudiniXR)
+endif()
+get_target_property(_hxr_dso_dir LOP_HoudiniXR RUNTIME_OUTPUT_DIRECTORY)
+message(STATUS "Plugin deploys to: ${_hxr_dso_dir}")
 
 message(STATUS "HFS          : ${HFS}")
 message(STATUS "pxr includes : ${_pxr_inc}")

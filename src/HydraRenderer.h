@@ -64,6 +64,14 @@ public:
     void RenderEye(int view, GfMatrix4d const& viewMatrix, GfMatrix4d const& projMatrix,
                    double frame = 0.0);
 
+    // Pauses the engine belonging to one view, if that view has one of its
+    // own (never a shared engine -- that would stop the views still rendering
+    // through it). A progressive delegate carries on accumulating in the
+    // background after its last Render(), so an eye that stops being rendered
+    // would otherwise keep the GPU busy until it converged. The next
+    // RenderEye() for that view resumes it.
+    void PauseView(int view);
+
     // True once the delegate has nothing more to add for the current camera.
     // Immediately true for Storm; for a progressive delegate, only after it
     // has accumulated enough samples at an unchanged camera.
@@ -113,6 +121,7 @@ private:
     HdDriver     _driver;
 
     std::vector<std::unique_ptr<UsdImagingGLEngine>> _engines;
+    std::vector<char>                                _paused;   // parallel to _engines
     std::unique_ptr<UsdImagingGLEngine>              _pickEngine;
     std::vector<Upload>                              _uploads;
 

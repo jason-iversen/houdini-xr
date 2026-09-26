@@ -1,7 +1,11 @@
-// Two modes:
+// Modes:
 //   (default) offscreen -- render one frame to a BMP, no headset needed.
 //   --xr                -- drive an OpenXR stereo session and present to the HMD.
+//   --desktop           -- capture the desktop the way the headset panel does,
+//                          to a BMP. No headset needed.
+//   --probe             -- report what the OpenXR runtime supports.
 
+#include "DesktopCapture.h"
 #include "GLContext.h"
 #include "HxrRuntime.h"
 #include "HydraRenderer.h"
@@ -36,12 +40,14 @@ struct Options
     int   maxHeight = 0;
     float converge  = 1.0f; // seconds to hold a pose for a progressive delegate
     bool  frozen    = false;
+    bool  mono      = false; // --xr: single-eye render (Stereo off on the node)
     bool  pick      = false; // offscreen: also pick along the view centre
     bool  reticle   = false; // offscreen: draw the reticle into the image
     int  width  = 1280;
     int  height = 720;
     bool  xr     = false;
     bool  probe  = false;
+    bool  desktop = false;
     int   frames = 0;   // 0 = run until the runtime asks us to stop
 
     // Where the stage's own origin sits relative to the XR reference space.
@@ -119,6 +125,8 @@ Options ParseArgs(int argc, char** argv)
             opts.xr = true;
         } else if (arg == "--probe") {
             opts.probe = true;
+        } else if (arg == "--desktop") {
+            opts.desktop = true;
         } else if (arg == "--dist" && hasNext) {
             opts.anchorDist = std::stof(argv[++i]);
         } else if (arg == "--height" && hasNext) {
@@ -131,13 +139,15 @@ Options ParseArgs(int argc, char** argv)
             opts.converge = std::stof(argv[++i]);
         } else if (arg == "--frozen") {
             opts.frozen = true;
+        } else if (arg == "--mono") {
+            opts.mono = true;
         } else if (arg == "--pick") {
             opts.pick = true;
         } else if (arg == "--reticle") {
             opts.reticle = true;
         } else {
-            std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--frames N]"
-                        " [--renderer PluginId] [--max-res WxH] [--converge S] [--frozen]"
+            std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--desktop] [--frames N]"
+                        " [--renderer PluginId] [--max-res WxH] [--converge S] [--frozen] [--mono]"
                         " [--pick] [--reticle]"
                         " [--dist M] [--height M] [--out image.bmp] [--size WxH]\n");
         }
@@ -263,6 +273,62 @@ bool ComposeWithReticle(HydraRenderer& renderer, float ndcX, float ndcY,
     return true;
 }
 
+// The headset panel's capture path end to end -- duplication, D3D11 -> GL
+// interop, the flipping (and, for a big monitor, halving) blit, the pointer
+// mark -- into an sRGB texture sized like the panel's swapchain, read back as
+// raw bytes (which are sRGB already).
+int RunDesktop(Options const& opts)
+{
+    DesktopCapture desktop;
+    if (!desktop.Init()) {
+        return 1;
+    }
+    int w = 0;
+    int h = 0;
+    desktop.PanelSize(&w, &h);
+
+    GLuint target = 0;
+    glGenTextures(1, &target);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    GLuint drawFbo = 0;
+    glGenFramebuffers(1, &drawFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    desktop.BlitTo(w, h);
+
+    // Raw bytes, no decode: glGetTexImage of an sRGB texture as
+    // GL_UNSIGNED_BYTE returns the stored encoding.
+    std::vector<uint8_t> texels(size_t(w) * size_t(h) * 4);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &drawFbo);
+    glDeleteTextures(1, &target);
+
+    // Bottom row first, like the swapchain; WriteBmp wants the top first.
+    // The alpha of a desktop image is meaningless, so force it opaque.
+    std::vector<uint8_t> rgba(texels.size());
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* src = &texels[size_t(h - 1 - y) * size_t(w) * 4];
+        uint8_t*       dst = &rgba[size_t(y) * size_t(w) * 4];
+        for (int x = 0; x < w; ++x) {
+            dst[x * 4 + 0] = src[x * 4 + 0];
+            dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4 + 2];
+            dst[x * 4 + 3] = 255;
+        }
+    }
+    if (!WriteBmp(opts.outPath, rgba, w, h)) {
+        return 1;
+    }
+    std::printf("Wrote %dx%d -> %s\n", w, h, opts.outPath.c_str());
+    return 0;
+}
+
 int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
 {
     HydraRenderer renderer;
@@ -371,6 +437,7 @@ int RunXr(Options const& opts, UsdStageRefPtr const& stage)
     runtime.SetMaxRenderSize(opts.maxWidth, opts.maxHeight);
     runtime.SetConvergeSeconds(opts.converge);
     runtime.SetFrozen(opts.frozen);
+    runtime.SetStereo(!opts.mono);
     runtime.SetStage(stage);
     runtime.SetAnchor(opts.anchorDist, opts.anchorHeight);
     runtime.Start();
@@ -447,5 +514,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    if (opts.desktop) {
+        return RunDesktop(opts);
+    }
     return RunOffscreen(opts, stage);
 }

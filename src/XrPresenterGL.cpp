@@ -9,8 +9,9 @@ PXR_NAMESPACE_USING_DIRECTIVE
 bool XrPresenterGL::CreateSwapchains(XrSession session, uint32_t width, uint32_t height,
                                      uint32_t viewCount)
 {
-    _width  = width;
-    _height = height;
+    _width   = width;
+    _height  = height;
+    _session = session;
 
     uint32_t formatCount = 0;
     if (XR_FAILED(xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr))) {
@@ -32,7 +33,8 @@ bool XrPresenterGL::CreateSwapchains(XrSession session, uint32_t width, uint32_t
             break;
         }
     }
-    _srgb = (chosen == int64_t(GL_SRGB8_ALPHA8));
+    _srgb   = (chosen == int64_t(GL_SRGB8_ALPHA8));
+    _format = chosen;
 
     _views.resize(viewCount);
     for (uint32_t i = 0; i < viewCount; ++i) {
@@ -137,6 +139,97 @@ bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth,
     return XR_SUCCEEDED(xrReleaseSwapchainImage(target.swapchain, &releaseInfo));
 }
 
+bool XrPresenterGL::EnsurePanelSwapchain(uint32_t width, uint32_t height, bool* created)
+{
+    *created = false;
+    if (_panel.swapchain != XR_NULL_HANDLE && width == _panelWidth && height == _panelHeight) {
+        return true;
+    }
+    if (_panel.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(_panel.swapchain);
+        _panel = {};
+    }
+
+    // A full mip chain, falling back to none if the runtime refuses it.
+    uint32_t mips = 1;
+    for (uint32_t size = std::max(width, height); size > 1; size /= 2) {
+        ++mips;
+    }
+
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags  = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                       XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
+                       XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    info.format      = _format;
+    info.sampleCount = 1;
+    info.width       = width;
+    info.height      = height;
+    info.faceCount   = 1;
+    info.arraySize   = 1;
+    info.mipCount    = mips;
+    if (XR_FAILED(xrCreateSwapchain(_session, &info, &_panel.swapchain))) {
+        info.mipCount = mips = 1;
+        if (XR_FAILED(xrCreateSwapchain(_session, &info, &_panel.swapchain))) {
+            std::fprintf(stderr, "XrPresenterGL: xrCreateSwapchain failed for the panel\n");
+            _panel.swapchain = XR_NULL_HANDLE;
+            return false;
+        }
+    }
+
+    uint32_t imageCount = 0;
+    xrEnumerateSwapchainImages(_panel.swapchain, 0, &imageCount, nullptr);
+    _panel.images.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR});
+    if (XR_FAILED(xrEnumerateSwapchainImages(
+            _panel.swapchain, imageCount, &imageCount,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(_panel.images.data())))) {
+        xrDestroySwapchain(_panel.swapchain);
+        _panel = {};
+        return false;
+    }
+
+    _panelWidth  = width;
+    _panelHeight = height;
+    _panelMips   = mips;
+    *created     = true;
+    std::printf("XrPresenterGL: panel swapchain %ux%u, %u mips%s\n", width, height, mips,
+                _srgb ? "" : " (not sRGB -- the desktop will look washed out)");
+    return true;
+}
+
+bool XrPresenterGL::PresentPanel(std::function<void(int width, int height)> const& draw)
+{
+    if (_panel.swapchain == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    uint32_t index = 0;
+    XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (XR_FAILED(xrAcquireSwapchainImage(_panel.swapchain, &acquireInfo, &index))) {
+        return false;
+    }
+    XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = XR_INFINITE_DURATION;
+    if (XR_FAILED(xrWaitSwapchainImage(_panel.swapchain, &waitInfo))) {
+        return false;
+    }
+
+    const GLuint image = _panel.images[index].image;
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _drawFbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
+    draw(int(_panelWidth), int(_panelHeight));
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+    if (_panelMips > 1) {
+        glBindTexture(GL_TEXTURE_2D, image);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    return XR_SUCCEEDED(xrReleaseSwapchainImage(_panel.swapchain, &releaseInfo));
+}
+
 void XrPresenterGL::Destroy()
 {
     for (ViewSwapchain& target : _views) {
@@ -145,6 +238,13 @@ void XrPresenterGL::Destroy()
         }
     }
     _views.clear();
+
+    if (_panel.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(_panel.swapchain);
+    }
+    _panel       = {};
+    _panelWidth  = 0;
+    _panelHeight = 0;
 
     if (_readFbo) {
         glDeleteFramebuffers(1, &_readFbo);

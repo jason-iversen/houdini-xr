@@ -192,6 +192,30 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    XrActionCreateInfo menuInfo{XR_TYPE_ACTION_CREATE_INFO};
+    menuInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(menuInfo.actionName, "toggle_desktop", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(menuInfo.localizedActionName, "Toggle Desktop", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &menuInfo, &_menuAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo downInfo{XR_TYPE_ACTION_CREATE_INFO};
+    downInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(downInfo.actionName, "move_down", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(downInfo.localizedActionName, "Move Down", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &downInfo, &_buttonAAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo upInfo{XR_TYPE_ACTION_CREATE_INFO};
+    upInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(upInfo.actionName, "move_up", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(upInfo.localizedActionName, "Move Up", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &upInfo, &_buttonBAction), "xrCreateAction")) {
+        return false;
+    }
+
     XrActionCreateInfo gripInfo{XR_TYPE_ACTION_CREATE_INFO};
     gripInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
     std::strncpy(gripInfo.actionName, "orbit", XR_MAX_ACTION_NAME_SIZE - 1);
@@ -223,6 +247,9 @@ bool XrViewportSession::_InitInput()
             {_thumbstickAction, path("/user/hand/right/input/thumbstick")},
             {_turnAction,       path("/user/hand/left/input/thumbstick")},
             {_thumbClickAction, path("/user/hand/right/input/thumbstick/click")},
+            {_menuAction,       path("/user/hand/left/input/menu/click")},
+            {_buttonAAction,    path("/user/hand/right/input/a/click")},
+            {_buttonBAction,    path("/user/hand/right/input/b/click")},
             {_gripAction,       path("/user/hand/right/input/squeeze/value")},
             {_aimPoseAction,    path("/user/hand/right/input/aim/pose")},
             {_aimPoseAction,    path("/user/hand/left/input/aim/pose")},
@@ -305,6 +332,9 @@ void XrViewportSession::_SyncInput()
     _rightThumbstick        = {0.0f, 0.0f};
     _leftThumbstick         = {0.0f, 0.0f};
     _rightThumbstickPressed = false;
+    _leftMenuPressed        = false;
+    _buttonA                = false;
+    _buttonB                = false;
     if (_actionSet == XR_NULL_HANDLE) {
         return;
     }
@@ -352,6 +382,23 @@ void XrViewportSession::_SyncInput()
     XrActionStateBoolean click{XR_TYPE_ACTION_STATE_BOOLEAN};
     if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &click)) && click.isActive) {
         _rightThumbstickPressed = click.changedSinceLastSync && click.currentState;
+    }
+
+    getInfo.action = _menuAction;
+    XrActionStateBoolean menu{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &menu)) && menu.isActive) {
+        _leftMenuPressed = menu.changedSinceLastSync && menu.currentState;
+    }
+
+    getInfo.action = _buttonAAction;
+    XrActionStateBoolean buttonA{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonA)) && buttonA.isActive) {
+        _buttonA = buttonA.currentState != XR_FALSE;
+    }
+    getInfo.action = _buttonBAction;
+    XrActionStateBoolean buttonB{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonB)) && buttonB.isActive) {
+        _buttonB = buttonB.currentState != XR_FALSE;
     }
 
     getInfo.action = _gripAction;
@@ -456,13 +503,40 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
     layer.viewCount  = uint32_t(projectionViews.size());
     layer.views      = projectionViews.data();
 
-    const XrCompositionLayerBaseHeader* layers[] = {
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer)};
+    const XrCompositionLayerBaseHeader* layers[2] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer), nullptr};
+    uint32_t layerCount = projectionViews.empty() ? 0u : 1u;
+
+    // The panel goes after the projection layer, so it draws on top -- even
+    // over scene geometry that's nearer. A panel failure only drops the
+    // panel; the scene still presents.
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    if (layerCount > 0 && _panel.visible && _panel.draw && _panel.width > 0 &&
+        _panel.height > 0) {
+        bool created = false;
+        bool ready   = _presenter.EnsurePanelSwapchain(_panel.width, _panel.height, &created);
+        if (ready && (created || _panelDirty)) {
+            ready       = _presenter.PresentPanel(_panel.draw);
+            _panelDirty = !ready;
+        }
+        if (ready) {
+            quad.space         = _space;
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.subImage.swapchain = _presenter.PanelSwapchain();
+            quad.subImage.imageRect.offset = {0, 0};
+            quad.subImage.imageRect.extent = {int32_t(_presenter.PanelWidth()),
+                                              int32_t(_presenter.PanelHeight())};
+            quad.pose = _panel.pose;
+            quad.size = {_panel.widthMetres,
+                         _panel.widthMetres * float(_panel.height) / float(_panel.width)};
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        }
+    }
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
     endInfo.displayTime          = frameState.predictedDisplayTime;
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    endInfo.layerCount           = projectionViews.empty() ? 0u : 1u;
+    endInfo.layerCount           = layerCount;
     endInfo.layers               = layers;
 
     return !Failed(xrEndFrame(_session, &endInfo), "xrEndFrame");
@@ -489,6 +563,9 @@ void XrViewportSession::Shutdown()
         _thumbstickAction = XR_NULL_HANDLE;
         _turnAction       = XR_NULL_HANDLE;
         _thumbClickAction = XR_NULL_HANDLE;
+        _menuAction       = XR_NULL_HANDLE;
+        _buttonAAction    = XR_NULL_HANDLE;
+        _buttonBAction    = XR_NULL_HANDLE;
         _gripAction       = XR_NULL_HANDLE;
         _aimPoseAction    = XR_NULL_HANDLE;
     }
