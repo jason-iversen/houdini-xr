@@ -3,6 +3,9 @@
 #include "RenderCamera.h"
 
 #include <CH/CH_Manager.h>
+#include <HOM/HOM_Errors.h>
+#include <HOM/HOM_Module.h>
+#include <HOM/HOM_playbar.h>
 #include <HUSD/HUSD_DataHandle.h>
 #include <HUSD/HUSD_RendererInfo.h>
 #include <OP/OP_DataMicroNode.h>
@@ -29,9 +32,11 @@ ARCH_PRAGMA_POP
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cwctype>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -98,6 +103,22 @@ GfVec3d EulerFromMatrix(GfMatrix4d const& m)
         GfVec3d::XAxis(), GfVec3d::YAxis(), GfVec3d::ZAxis());
 }
 
+// Main thread only. hou.setFrame, and hou.playbar.stop first if it's
+// playing: a scrub and playback would fight over the frame, and dragging
+// Houdini's own playbar stops playback too. Without a UI (hbatch) there's no
+// playbar to stop, but the frame is still set.
+void SetPlaybarFrame(double frame)
+{
+    try {
+        HOM_playbar& playbar = HOM().playbar();
+        if (playbar.isPlaying()) {
+            playbar.stop();
+        }
+    } catch (HOM_Error&) {
+    }
+    HOM().setFrame(frame);
+}
+
 } // namespace
 
 void
@@ -123,6 +144,8 @@ static PRM_Name theDistName("dist", "Anchor Distance");
 static PRM_Name theHeightName("height", "Anchor Height");
 static PRM_Name theResyncName("resync", "Resync Camera");
 static PRM_Name theMoveSpeedName("movespeed", "Move Speed");
+static PRM_Name theSnapTurnName("snapturn", "Snap Turn Angle");
+static PRM_Name theScrubRateName("scrubrate", "Scrub Rate");
 static PRM_Name theShowReticleName("showreticle", "Show Reticle");
 static PRM_Name theApplyPlacementName("applyplacement", "Apply Camera Placement");
 static PRM_Name thePlaceTranslateName("pt", "Placement Translate");
@@ -133,8 +156,12 @@ static PRM_Default theConvergeDefault(1.0);
 static PRM_Default theDistDefault(2.0);
 static PRM_Default theHeightDefault(1.2);
 static PRM_Default theMoveSpeedDefault(1.5);
+static PRM_Default theSnapTurnDefault(30.0);
+static PRM_Default theScrubRateDefault(24.0);
 
 static PRM_Range theConvergeRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 10.0);
+static PRM_Range theSnapTurnRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_RESTRICTED, 180.0);
+static PRM_Range theScrubRateRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 96.0);
 
 // Populated each time the menu opens: every delegate in the Hydra registry,
 // filtered and labelled the way Houdini's own viewport menu does it, via the
@@ -208,6 +235,11 @@ LOP_XrOutput::myTemplateList[] = {
                 &LOP_XrOutput::onResyncCamera),
     // Right-thumbstick locomotion, metres per second at full deflection.
     PRM_Template(PRM_FLT,    1, &theMoveSpeedName, &theMoveSpeedDefault),
+    // Degrees per flick of the left thumbstick; 0 turns snap turn off.
+    PRM_Template(PRM_FLT,    1, &theSnapTurnName, &theSnapTurnDefault, 0, &theSnapTurnRange),
+    // Left trigger + twist scrubs the playbar: frames per quarter turn of
+    // the wrist, clockwise forward. 0 turns scrubbing off.
+    PRM_Template(PRM_FLT,    1, &theScrubRateName, &theScrubRateDefault, 0, &theScrubRateRange),
     // Gaze reticle; also marks the pivot a right-grip orbit turns about.
     // Worth turning off for a clean look at a converged frame.
     PRM_Template(PRM_TOGGLE, 1, &theShowReticleName, PRMoneDefaults),
@@ -246,6 +278,30 @@ LOP_XrOutput::LOP_XrOutput(OP_Network* net, const char* name, OP_Operator* op)
             if (auto* node = dynamic_cast<LOP_XrOutput*>(OP_Node::lookupNode(nodeId))) {
                 node->applyPlacement(placement);
             }
+        });
+    });
+
+    // Scrub frames arrive at up to headset rate, far faster than a heavy
+    // scene cooks. Keep only the latest, with at most one event queued to
+    // deliver it, so a slow cook skips intermediate frames rather than
+    // working through a backlog of them long after the wrist has stopped.
+    // Shared state rather than the node: a queued event can outlive it.
+    struct PendingScrub
+    {
+        std::atomic<double> frame{0.0};
+        std::atomic<bool>   queued{false};
+    };
+    auto pending = std::make_shared<PendingScrub>();
+    myRuntime->SetScrubCallback([pending](double frame) {
+        pending->frame = frame;
+        if (!UT_HoudiniExecutionContext::hasInstance() || pending->queued.exchange(true)) {
+            return;
+        }
+        UT_HoudiniExecutionContext::instance()->post([pending]() {
+            // Cleared before reading, so a frame stored after the read
+            // queues a fresh event instead of being dropped.
+            pending->queued = false;
+            SetPlaybarFrame(pending->frame.load());
         });
     });
 }
@@ -343,6 +399,8 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     myRuntime->SetConvergeSeconds(float(evalFloat(theConvergeName, 0, t)));
     myRuntime->SetFrozen(evalInt(theFrozenName, 0, t) != 0);
     myRuntime->SetMoveSpeed(float(evalFloat(theMoveSpeedName, 0, t)));
+    myRuntime->SetSnapTurnDegrees(float(evalFloat(theSnapTurnName, 0, t)));
+    myRuntime->SetScrubRate(float(evalFloat(theScrubRateName, 0, t)));
     myRuntime->SetShowReticle(evalInt(theShowReticleName, 0, t) != 0);
 
     // HUSD authors USD time samples using the Houdini frame number (not

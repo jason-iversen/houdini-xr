@@ -199,8 +199,8 @@ The same transform folds in the stage's `metersPerUnit` and `upAxis`
 (`StageToRoomUnits`), since XR poses are always metres and Y-up. Without that
 a centimetre or Z-up stage renders 100× too large or on its side.
 
-**The user's own adjustments — locomotion and grip orbit — live in one
-accumulated room-space transform, `userXform`**, each new adjustment appended
+**The user's own adjustments — locomotion, snap turn and grip orbit — live in
+one accumulated room-space transform, `userXform`**, each new adjustment appended
 last: `worldFromStage = base * userXform * orbitLive`. They must share one
 transform. They were briefly separate (a locomotion translation vector, then
 an orbit composed after it), which breaks as soon as they interleave: after a
@@ -208,6 +208,12 @@ an orbit composed after it), which breaks as soon as they interleave: after a
 in room space but was applied in pre-orbit space. Moving the user forward is
 shifting the stage backward, so locomotion appends `Translation(-step)`.
 Direction follows the *live* head heading from the previous frame's callback.
+Snap turn appends `T(-pivot) * R_y(±angle) * T(pivot)` with the pivot on the
+head centre's vertical axis, so the view turns in place; turning the user
+right is *+yaw* on the stage (+Y rotation carries what's ahead to the left). A
+flick fires past 0.7 deflection and re-arms below 0.3. Snap is ignored while
+the grip is held — the orbit pivot is latched in room space, and turning the
+stage under it would move it off its surface point.
 Resync clears `userXform` (Resync means "back to the camera").
 
 ### Reticle and grip orbit
@@ -287,6 +293,30 @@ must be released before the live block's read lock. Since the input's
 `modVersion` can't see the node's own edits, a placement sets `myOutputDirty`
 to force one reflatten, and Resync-while-applied does too (that's when the
 snapshot's camera is actually read).
+
+### Playbar scrub also crosses back to the main thread
+
+Left trigger + twist of the left controller about its aim axis (`-Z`) scrubs
+the playbar. `TwistAboutLocalZ` (XrMath.h) takes the twist component of the
+rotation since the trigger press (swing-twist decomposition), so pointing the
+controller elsewhere doesn't count; clockwise as the user sees it is negative
+about `+Z`, and maps forward. The target frame is `round(start + quarterTurns *
+Scrub Rate)`, and the start frame *tracks `_timeCode` until the first whole
+frame of movement* — otherwise a trigger pulled during playback, or held just
+for interactive placement, would yank the playbar back to the press frame.
+
+The runtime reports each new target frame through a callback. The plugin
+coalesces: the latest frame goes into shared state and at most one
+`post()`ed event is queued (`queued` is cleared *before* the frame is read),
+because frames arrive at headset rate and a heavy scene cooks far slower —
+without this, events back up and the playbar keeps moving long after the
+wrist stops. The event calls `hou.playbar.stop()` (if playing) then
+`hou.setFrame()` through HOM from C++. The runtime never sets `_timeCode`
+itself: the new frame comes back through the normal cook → `SetTimeCode`
+path, so there's only one source of truth for the time.
+
+The left trigger still counts as interactive placement, which is what a
+scrub needs anyway: each frame change would restart a progressive delegate.
 
 ### Interactive Placement is resolved on the render thread
 
@@ -444,17 +474,20 @@ captured is forced to capture regardless of the frame-level decision.
 Node parameters: `Live`, `Interactive Placement`, `Renderer`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
 `Anchor Distance`, `Anchor Height`, `Resync Camera`, `Move Speed`,
-`Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
+`Snap Turn Angle`, `Scrub Rate`, `Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
 `Placement Rotate`.
 
 **Controller input** (`XrViewportSession`, one action set): trigger (float,
-both hands), right thumbstick (Vector2f), right thumbstick click (boolean,
-edge via `changedSinceLastSync`), right squeeze (float), right aim pose (via
-an action space). Actions sync at the top of every `RenderFrame`; the aim
-pose is located after `xrWaitFrame`. All read as zero / invalid when the
-session isn't focused. In the headset: trigger held = interactive placement,
-thumbstick = move, thumbstick click = place the camera at the head, grip held
-+ turn = orbit about the reticle.
+both hands as subaction paths — read combined, or the left alone), right
+thumbstick (Vector2f), left thumbstick (Vector2f), right thumbstick click
+(boolean, edge via `changedSinceLastSync`), right squeeze (float), aim pose
+(both hands as subaction paths, one action space per hand). Actions sync at
+the top of every `RenderFrame`; the aim poses are located after
+`xrWaitFrame`. All read as zero / invalid when the session isn't focused. In
+the headset: either trigger held = interactive placement, right stick = move,
+left stick flick = snap turn, right stick click = place the camera at the
+head, right grip held + turn = orbit about the reticle, left trigger held +
+twist = scrub the playbar.
 
 ---
 
@@ -495,7 +528,8 @@ in the plugin.
 
 Built but **not yet confirmed in-headset**: head-anchored placement (replacing
 the origin-anchored version), thumbstick locomotion, thumbstick-click camera
-placement, trigger-driven interactive placement, the reticle, grip orbit. (The
+placement, trigger-driven interactive placement, the reticle, grip orbit, snap turn,
+left-trigger playbar scrub. (The
 pick underneath the reticle and orbit *is* verified, offscreen, via `--pick`.)
 
 Open questions, deliberately instrumented rather than assumed:

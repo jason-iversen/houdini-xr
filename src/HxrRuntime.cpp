@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <vector>
@@ -101,6 +102,12 @@ void HxrRuntime::SetPlacementCallback(PlacementCallback callback)
 {
     std::lock_guard<std::mutex> lock(_callbackMutex);
     _placementCallback = std::move(callback);
+}
+
+void HxrRuntime::SetScrubCallback(ScrubCallback callback)
+{
+    std::lock_guard<std::mutex> lock(_callbackMutex);
+    _scrubCallback = std::move(callback);
 }
 
 namespace {
@@ -245,7 +252,7 @@ void HxrRuntime::ThreadMain()
     bool        lastFrozen = false;
 
     // The user's own adjustments to where the stage sits -- thumbstick
-    // locomotion and grip orbit -- accumulated as one room-space transform,
+    // locomotion, snap turn and grip orbit -- accumulated as one room-space transform,
     // each new adjustment appended last. Holding them separately (a
     // translation vector, then an orbit) breaks as soon as they interleave:
     // after a 90-degree orbit the thumbstick would move you sideways, since
@@ -265,6 +272,13 @@ void HxrRuntime::ThreadMain()
     constexpr double kStickDeadzone = 0.15;
     constexpr double kMaxFrameDt    = 0.1;   // don't lurch after a stall
 
+    // Snap turn: one step per flick of the left stick. Hysteresis, so a
+    // stick hovering near the threshold can't fire repeatedly -- it has to
+    // come back near centre before the next flick counts.
+    constexpr double kSnapFire  = 0.7;
+    constexpr double kSnapRearm = 0.3;
+    bool             snapArmed  = true;
+
     // Grip orbit: while held, the stage rotates about the surface point under
     // the reticle by however the right controller has turned since the grip
     // began -- grab-and-turn, so the scene turns with the hand. Committed into
@@ -274,6 +288,16 @@ void HxrRuntime::ThreadMain()
     GfVec3d    orbitPivotRoom(0.0);
     GfMatrix4d orbitStartRotation(1.0);   // controller orientation at grip start
     GfMatrix4d orbitLive(1.0);
+
+    // Playbar scrub (left trigger + twist). The start frame follows the
+    // playbar until the twist first moves it a whole frame, so a trigger
+    // pulled during playback -- or just held for interactive placement --
+    // doesn't yank the playbar back to where it was at the press.
+    bool          scrubHeld  = false;
+    bool          scrubMoved = false;
+    XrQuaternionf scrubStartOrientation{0.0f, 0.0f, 0.0f, 1.0f};
+    double        scrubStartFrame = 0.0;
+    double        scrubLastFrame  = 0.0;
 
     // Reticle: a ray from the head centre along the gaze, picked against the
     // scene. Picking is a render pass, so it's throttled; the stage-space hit
@@ -443,6 +467,31 @@ void HxrRuntime::ThreadMain()
                                  frustum.ComputeProjectionMatrix(), _timeCode.load(), hitStage);
         };
 
+        // --- Snap turn ---
+        // Appended to userXform like locomotion. Turning the user right is
+        // turning the stage the other way about them, which is +yaw here
+        // (+Y rotation carries what's ahead off to the left). Pivoting on the
+        // head centre's vertical axis turns the view in place, with no
+        // sideways lurch. Not while orbiting: the orbit's pivot was latched
+        // in room space, and turning the stage underneath it would move its
+        // surface point away -- the flick is consumed but ignored.
+        {
+            const double turnX = xr.LeftThumbstick().x;
+            if (std::abs(turnX) < kSnapRearm) {
+                snapArmed = true;
+            } else if (snapArmed && std::abs(turnX) > kSnapFire) {
+                snapArmed = false;
+                const double degrees = double(_snapTurnDegrees.load());
+                if (degrees > 0.0 && !gripHeld && haveLiveHead) {
+                    GfMatrix4d turn;
+                    turn.SetRotate(GfRotation(GfVec3d(0.0, 1.0, 0.0),
+                                              turnX > 0.0 ? degrees : -degrees));
+                    const GfVec3d pivot(headCentre[0], 0.0, headCentre[2]);
+                    userXform = userXform * Translation(-pivot) * turn * Translation(pivot);
+                }
+            }
+        }
+
         // --- Grip orbit ---
         XrPosef    aimPose{};
         const bool aimValid = xr.RightAimPose(&aimPose);
@@ -504,6 +553,44 @@ void HxrRuntime::ThreadMain()
             if (callback) {
                 callback(CameraPlacement{liveHeadToWorld * worldFromStage.GetInverse(),
                                          _timeCode.load()});
+            }
+        }
+
+        // --- Playbar scrub ---
+        {
+            XrPosef    leftAim{};
+            const bool leftAimValid = xr.LeftAimPose(&leftAim);
+            const bool leftTrigger  = xr.LeftTriggerValue() > kTriggerHeldThreshold;
+            if (!leftTrigger) {
+                scrubHeld = false;
+            } else if (!scrubHeld && leftAimValid) {
+                scrubHeld             = true;
+                scrubMoved            = false;
+                scrubStartOrientation = leftAim.orientation;
+            }
+
+            const double rate = double(_scrubRate.load());
+            if (scrubHeld && leftAimValid && rate > 0.0) {
+                if (!scrubMoved) {
+                    scrubStartFrame = _timeCode.load();
+                }
+                // Aim poses point down -Z, so clockwise as the user sees it
+                // is negative about the controller's +Z.
+                const double quarterTurns =
+                    -TwistAboutLocalZ(scrubStartOrientation, leftAim.orientation) / (0.5 * M_PI);
+                const double frame = std::round(scrubStartFrame + quarterTurns * rate);
+                if (scrubMoved ? frame != scrubLastFrame : frame != std::round(scrubStartFrame)) {
+                    scrubMoved     = true;
+                    scrubLastFrame = frame;
+                    ScrubCallback callback;
+                    {
+                        std::lock_guard<std::mutex> lock(_callbackMutex);
+                        callback = _scrubCallback;
+                    }
+                    if (callback) {
+                        callback(frame);
+                    }
+                }
             }
         }
 

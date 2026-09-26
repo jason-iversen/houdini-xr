@@ -141,11 +141,26 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    auto path = [this](const char* s) {
+        XrPath p = XR_NULL_PATH;
+        xrStringToPath(_instance, s, &p);
+        return p;
+    };
+
+    // The trigger and aim actions declare both hands as subaction paths, so
+    // each hand can be read on its own. Queried without one, the trigger
+    // still resolves to whichever hand is pulled further.
+    _leftHand  = path("/user/hand/left");
+    _rightHand = path("/user/hand/right");
+    const XrPath hands[] = {_leftHand, _rightHand};
+
     // A float action rather than boolean: Touch exposes the trigger as
     // /trigger/value with no /click, and a boolean source can still be bound
     // to a float action where a profile only has that.
     XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
     actionInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    actionInfo.countSubactionPaths = uint32_t(std::size(hands));
+    actionInfo.subactionPaths      = hands;
     std::strncpy(actionInfo.actionName, "interactive_placement", XR_MAX_ACTION_NAME_SIZE - 1);
     std::strncpy(actionInfo.localizedActionName, "Interactive Placement",
                  XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
@@ -158,6 +173,14 @@ bool XrViewportSession::_InitInput()
     std::strncpy(stickInfo.actionName, "move", XR_MAX_ACTION_NAME_SIZE - 1);
     std::strncpy(stickInfo.localizedActionName, "Move", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
     if (Failed(xrCreateAction(_actionSet, &stickInfo, &_thumbstickAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo turnInfo{XR_TYPE_ACTION_CREATE_INFO};
+    turnInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+    std::strncpy(turnInfo.actionName, "turn", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(turnInfo.localizedActionName, "Turn", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &turnInfo, &_turnAction), "xrCreateAction")) {
         return false;
     }
 
@@ -179,21 +202,18 @@ bool XrViewportSession::_InitInput()
 
     XrActionCreateInfo aimInfo{XR_TYPE_ACTION_CREATE_INFO};
     aimInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    aimInfo.countSubactionPaths = uint32_t(std::size(hands));
+    aimInfo.subactionPaths      = hands;
     std::strncpy(aimInfo.actionName, "aim", XR_MAX_ACTION_NAME_SIZE - 1);
     std::strncpy(aimInfo.localizedActionName, "Aim", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
     if (Failed(xrCreateAction(_actionSet, &aimInfo, &_aimPoseAction), "xrCreateAction")) {
         return false;
     }
 
-    auto path = [this](const char* s) {
-        XrPath p = XR_NULL_PATH;
-        xrStringToPath(_instance, s, &p);
-        return p;
-    };
-
     // Suggest per profile; a runtime ignores profiles it doesn't know. The
-    // trigger action binds to both hands; the stick is right-hand only. The
-    // Khronos simple profile has no thumbstick, so it only gets the trigger.
+    // trigger and aim actions bind to both hands; move is the right stick,
+    // turn the left. The Khronos simple profile has no thumbstick, so it only gets
+    // the trigger.
     bool anyAccepted = false;
 
     {
@@ -201,9 +221,11 @@ bool XrViewportSession::_InitInput()
             {_triggerAction,    path("/user/hand/left/input/trigger/value")},
             {_triggerAction,    path("/user/hand/right/input/trigger/value")},
             {_thumbstickAction, path("/user/hand/right/input/thumbstick")},
+            {_turnAction,       path("/user/hand/left/input/thumbstick")},
             {_thumbClickAction, path("/user/hand/right/input/thumbstick/click")},
             {_gripAction,       path("/user/hand/right/input/squeeze/value")},
             {_aimPoseAction,    path("/user/hand/right/input/aim/pose")},
+            {_aimPoseAction,    path("/user/hand/left/input/aim/pose")},
         };
         XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         suggested.interactionProfile     = path("/interaction_profiles/oculus/touch_controller");
@@ -235,40 +257,53 @@ bool XrViewportSession::_InitInput()
     }
 
     // A pose action is read by locating a space bound to it, not by
-    // xrGetActionState. Failing here only loses orbit; the rest still works.
+    // xrGetActionState -- one space per hand. Failing here only loses orbit
+    // (right) or scrub (left); the rest still works.
     XrActionSpaceCreateInfo spaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
     spaceInfo.action = _aimPoseAction;
-    spaceInfo.subactionPath = XR_NULL_PATH;
     spaceInfo.poseInActionSpace.orientation.w = 1.0f;
+    spaceInfo.subactionPath = _rightHand;
     if (Failed(xrCreateActionSpace(_session, &spaceInfo, &_rightAimSpace), "xrCreateActionSpace")) {
         _rightAimSpace = XR_NULL_HANDLE;
     }
+    spaceInfo.subactionPath = _leftHand;
+    if (Failed(xrCreateActionSpace(_session, &spaceInfo, &_leftAimSpace), "xrCreateActionSpace")) {
+        _leftAimSpace = XR_NULL_HANDLE;
+    }
+    return true;
+}
+
+bool XrViewportSession::_LocateAim(XrSpace space, XrTime time, XrPosef* pose) const
+{
+    if (space == XR_NULL_HANDLE) {
+        return false;
+    }
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(space, _space, time, &location))) {
+        return false;
+    }
+    const XrSpaceLocationFlags needed =
+        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if ((location.locationFlags & needed) != needed) {
+        return false;
+    }
+    *pose = location.pose;
     return true;
 }
 
 void XrViewportSession::_LocateControllers(XrTime time)
 {
-    _rightAimValid = false;
-    if (_rightAimSpace == XR_NULL_HANDLE) {
-        return;
-    }
-
-    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-    if (XR_SUCCEEDED(xrLocateSpace(_rightAimSpace, _space, time, &location))) {
-        const XrSpaceLocationFlags needed =
-            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-        if ((location.locationFlags & needed) == needed) {
-            _rightAimPose  = location.pose;
-            _rightAimValid = true;
-        }
-    }
+    _rightAimValid = _LocateAim(_rightAimSpace, time, &_rightAimPose);
+    _leftAimValid  = _LocateAim(_leftAimSpace, time, &_leftAimPose);
 }
 
 void XrViewportSession::_SyncInput()
 {
     _triggerValue           = 0.0f;
+    _leftTriggerValue       = 0.0f;
     _gripValue              = 0.0f;
     _rightThumbstick        = {0.0f, 0.0f};
+    _leftThumbstick         = {0.0f, 0.0f};
     _rightThumbstickPressed = false;
     if (_actionSet == XR_NULL_HANDLE) {
         return;
@@ -291,10 +326,24 @@ void XrViewportSession::_SyncInput()
         _triggerValue = trigger.currentState;
     }
 
+    getInfo.subactionPath = _leftHand;
+    XrActionStateFloat leftTrigger{XR_TYPE_ACTION_STATE_FLOAT};
+    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &leftTrigger)) &&
+        leftTrigger.isActive) {
+        _leftTriggerValue = leftTrigger.currentState;
+    }
+    getInfo.subactionPath = XR_NULL_PATH;
+
     getInfo.action = _thumbstickAction;
     XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
     if (XR_SUCCEEDED(xrGetActionStateVector2f(_session, &getInfo, &stick)) && stick.isActive) {
         _rightThumbstick = stick.currentState;
+    }
+
+    getInfo.action = _turnAction;
+    XrActionStateVector2f turn{XR_TYPE_ACTION_STATE_VECTOR2F};
+    if (XR_SUCCEEDED(xrGetActionStateVector2f(_session, &getInfo, &turn)) && turn.isActive) {
+        _leftThumbstick = turn.currentState;
     }
 
     // Edge, not level: the runtime tracks changes between syncs, so this is
@@ -427,6 +476,10 @@ void XrViewportSession::Shutdown()
         xrDestroySpace(_rightAimSpace);
         _rightAimSpace = XR_NULL_HANDLE;
     }
+    if (_leftAimSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(_leftAimSpace);
+        _leftAimSpace = XR_NULL_HANDLE;
+    }
 
     // Destroying the set destroys its actions.
     if (_actionSet != XR_NULL_HANDLE) {
@@ -434,6 +487,7 @@ void XrViewportSession::Shutdown()
         _actionSet        = XR_NULL_HANDLE;
         _triggerAction    = XR_NULL_HANDLE;
         _thumbstickAction = XR_NULL_HANDLE;
+        _turnAction       = XR_NULL_HANDLE;
         _thumbClickAction = XR_NULL_HANDLE;
         _gripAction       = XR_NULL_HANDLE;
         _aimPoseAction    = XR_NULL_HANDLE;

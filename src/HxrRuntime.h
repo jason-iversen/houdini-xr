@@ -61,6 +61,10 @@ public:
     // second. Movement is relative to the head's horizontal heading.
     void SetMoveSpeed(float metresPerSecond) { _moveSpeed = metresPerSecond; }
 
+    // Left-thumbstick snap turn, degrees per flick; 0 disables it. Turns in
+    // place about the head's vertical axis.
+    void SetSnapTurnDegrees(float degrees) { _snapTurnDegrees = degrees; }
+
     // The gaze reticle. It sits on the surface under the line of sight, and
     // marks the pivot a right-grip orbit will turn about.
     void SetShowReticle(bool show) { _showReticle = show; }
@@ -77,6 +81,20 @@ public:
     };
     using PlacementCallback = std::function<void(CameraPlacement const&)>;
     void SetPlacementCallback(PlacementCallback callback);
+
+    // Playbar scrub: hold the left trigger and twist the left controller
+    // about its pointing axis, clockwise (as seen along it) forward, like a
+    // jog wheel. Frames per quarter turn of twist; 0 disables it. The twist
+    // is measured from the trigger press, so re-grabbing ratchets past the
+    // wrist's range.
+    void SetScrubRate(float framesPerQuarterTurn) { _scrubRate = framesPerQuarterTurn; }
+
+    // Invoked, ON THE RENDER THREAD, with the whole frame the playbar should
+    // move to -- only when that frame changes, so at most once per headset
+    // frame. The callee owns getting it to the playbar; this class only ever
+    // learns the result, as the next SetTimeCode.
+    using ScrubCallback = std::function<void(double frame)>;
+    void SetScrubCallback(ScrubCallback callback);
 
     // How the head pose used for rendering relates to the live one.
     //
@@ -135,6 +153,8 @@ private:
     std::atomic<bool>   _interactive{false};
     std::atomic<bool>   _refreezeRequested{false};
     std::atomic<float>  _moveSpeed{1.5f};
+    std::atomic<float>  _snapTurnDegrees{30.0f};
+    std::atomic<float>  _scrubRate{24.0f};
     std::atomic<bool>   _showReticle{true};
 
     std::mutex     _stageMutex;
@@ -145,4 +165,5 @@ private:
 
     std::mutex        _callbackMutex;
     PlacementCallback _placementCallback;
+    ScrubCallback     _scrubCallback;
 };

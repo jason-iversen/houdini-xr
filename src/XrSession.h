@@ -69,9 +69,16 @@ public:
     // isn't active (session not focused, controllers asleep).
     float TriggerValue() const { return _triggerValue; }
 
+    // The left trigger alone, 0..1 -- it doubles as the playbar scrub grab.
+    float LeftTriggerValue() const { return _leftTriggerValue; }
+
     // Right-hand thumbstick, each axis -1..1, +y pushed away from the user.
     // Zero whenever input isn't active.
     XrVector2f RightThumbstick() const { return _rightThumbstick; }
+
+    // Left-hand thumbstick, same convention. Only its x axis is used (snap
+    // turn); the right stick already has move and strafe.
+    XrVector2f LeftThumbstick() const { return _leftThumbstick; }
 
     // True only on the frame the right thumbstick is clicked down.
     bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
@@ -87,11 +94,19 @@ public:
         return _rightAimValid;
     }
 
+    // Same, for the left controller.
+    bool LeftAimPose(XrPosef* pose) const
+    {
+        *pose = _leftAimPose;
+        return _leftAimValid;
+    }
+
 private:
     bool _InitImpl(GLContext const& gl);
     bool _InitInput();
     void _SyncInput();
     void _LocateControllers(XrTime time);
+    bool _LocateAim(XrSpace space, XrTime time, XrPosef* pose) const;
 
     XrInstance _instance = XR_NULL_HANDLE;
     XrSystemId _systemId = XR_NULL_SYSTEM_ID;
@@ -109,16 +124,24 @@ private:
     XrActionSet _actionSet        = XR_NULL_HANDLE;
     XrAction    _triggerAction    = XR_NULL_HANDLE;
     XrAction    _thumbstickAction = XR_NULL_HANDLE;
+    XrAction    _turnAction       = XR_NULL_HANDLE;
     XrAction    _thumbClickAction = XR_NULL_HANDLE;
     XrAction    _gripAction       = XR_NULL_HANDLE;
     XrAction    _aimPoseAction    = XR_NULL_HANDLE;
     XrSpace     _rightAimSpace    = XR_NULL_HANDLE;
+    XrSpace     _leftAimSpace     = XR_NULL_HANDLE;
+    XrPath      _leftHand         = XR_NULL_PATH;
+    XrPath      _rightHand        = XR_NULL_PATH;
     float       _triggerValue     = 0.0f;
+    float       _leftTriggerValue = 0.0f;
     float       _gripValue        = 0.0f;
     XrVector2f  _rightThumbstick{0.0f, 0.0f};
+    XrVector2f  _leftThumbstick{0.0f, 0.0f};
     bool        _rightThumbstickPressed = false;
     XrPosef     _rightAimPose{};
     bool        _rightAimValid = false;
+    XrPosef     _leftAimPose{};
+    bool        _leftAimValid = false;
     bool     _running   = false;
     bool     _quit      = false;
 };

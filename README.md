@@ -30,8 +30,8 @@ Working and validated on hardware:
 - Selectable render delegate — Storm by default, with Karma CPU/XPU and any
   other Hydra delegate Houdini registers available from a menu
 
-This is a working prototype, not a finished tool. There is no controller input,
-no in-headset navigation, and no UI beyond the node's parameters.
+This is a working prototype, not a finished tool. There's no in-headset UI —
+everything is driven by the node's parameters and the controllers.
 
 **About Karma and other progressive renderers.** Storm is a rasterizer and
 renders a clean frame in one pass. Karma is a path tracer that converges over
@@ -146,6 +146,8 @@ your setup.
 | **Anchor Height** | How high the stage sits (metres) |
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
 | **Move Speed** | Thumbstick locomotion speed, metres per second |
+| **Snap Turn Angle** | Degrees per left-thumbstick flick; 0 turns snap turn off |
+| **Scrub Rate** | Frames per quarter turn of the wrist when scrubbing the playbar; 0 turns scrubbing off |
 | **Show Reticle** | The gaze crosshair; turn off for a clean look at a converged frame |
 | **Apply Camera Placement** | Author the RenderSettings camera from the placement keys below |
 | **Placement Translate / Rotate** | The placed camera's pose in stage space — keyed by the thumbstick click |
@@ -156,8 +158,10 @@ your setup.
 |---|---|
 | Either trigger (held) | Interactive Placement while held — live Storm view |
 | Right thumbstick | Move: forward/back and strafe, relative to where you're looking |
+| Left thumbstick flick left/right | **Snap turn** by the Snap Turn Angle |
 | Right thumbstick click | **Place the camera** where your head is, at the current frame |
 | Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle |
+| Left trigger (held) + twist the controller | **Scrub the playbar** — clockwise forward, like a jog wheel |
 
 **The reticle** is the crosshair in the centre of your view. It sits *on* the
 surface you're looking at (not floating in front of it), which is also the
@@ -167,9 +171,23 @@ view stays. Like the trigger, holding the grip shows a live Storm view, so
 orbiting stays smooth even with Karma selected; releasing hands back to your
 renderer.
 
+**Scrubbing the playbar.** Hold the left trigger and twist your wrist, as if
+turning a dial: clockwise steps forward, anticlockwise back, 24 frames per
+quarter turn by default. It's measured from where your hand was when you
+pulled the trigger, so to go further, release, twist back and grab again. If
+the playbar is playing, the first step of a scrub stops it. Since the left
+trigger is also an Interactive Placement trigger, you see a live Storm view
+while scrubbing — a frame change would restart Karma every time — and your
+renderer takes over again when you let go. How quickly the headset follows
+depends on how fast your scene cooks: if it can't keep up, frames are skipped
+rather than queued, so the playbar stops when your hand does.
+
 Moving with the thumbstick is smooth locomotion — it doesn't change your
-tracked position, it moves the scene around you. **Resync Camera** puts you
-back at the camera, undoing both movement and orbit.
+tracked position, it moves the scene around you. Snap turn is the comfortable
+way to turn around without turning your body: a quick flick of the left
+stick turns you in place by a fixed step, rather than rotating smoothly (which
+many people find nauseating). **Resync Camera** puts you back at the camera,
+undoing movement, turns and orbit.
 
 **Placing the camera.** Walk the scene, line up the view you want, and click
 the right thumbstick. That keys your head's position and orientation (pitch
