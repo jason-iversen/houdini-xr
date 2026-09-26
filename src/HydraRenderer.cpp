@@ -12,6 +12,7 @@
 #include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/imaging/hd/types.h>
+#include <pxr/imaging/hdx/pickTask.h>
 #include <pxr/imaging/hf/pluginDesc.h>
 #include <pxr/imaging/hgi/tokens.h>
 #include <pxr/imaging/hgiGL/texture.h>
@@ -72,6 +73,7 @@ HydraRenderer::~HydraRenderer()
     // Engines first, while the GL context that created their Hgi resources
     // is still current, and before the Hgi they share goes away.
     _engines.clear();
+    _pickEngine.reset();
     for (Upload& upload : _uploads) {
         if (upload.texture) {
             glDeleteTextures(1, &upload.texture);
@@ -181,8 +183,11 @@ bool HydraRenderer::_ConfigureEngine(UsdImagingGLEngine& engine) const
 bool HydraRenderer::_CreateEngines(int count)
 {
     // Release the old ones before building new: each live engine is a full
-    // set of Hgi resources and Hydra scene state.
+    // set of Hgi resources and Hydra scene state. The pick engine goes too --
+    // it was populated from the old stage and would silently ignore the new
+    // one (the same _isPopulated trap as the display engines).
     _engines.clear();
+    _pickEngine.reset();
     _probed = false;
 
     for (int i = 0; i < count; ++i) {
@@ -281,6 +286,54 @@ bool HydraRenderer::IsConverged(int view) const
     return engine ? engine->IsConverged() : true;
 }
 
+bool HydraRenderer::Pick(GfMatrix4d const& viewMatrix, GfMatrix4d const& projMatrix,
+                         double frame, GfVec3d* outHitStage)
+{
+    if (!_stage) {
+        return false;
+    }
+
+    UsdImagingGLEngine* engine = nullptr;
+    if (_pluginId == kStormPlugin && !_engines.empty()) {
+        engine = _engines[0].get();
+    } else {
+        if (!_pickEngine) {
+            UsdImagingGLEngine::Parameters params;
+            params.driver           = _driver;
+            params.rendererPluginId = kStormPlugin;
+            params.gpuEnabled       = true;
+            _pickEngine = std::make_unique<UsdImagingGLEngine>(params);
+            if (!_ConfigureEngine(*_pickEngine)) {
+                _pickEngine.reset();
+                return false;
+            }
+        }
+        engine = _pickEngine.get();
+    }
+
+    UsdImagingGLRenderParams params;
+    params.frame    = frame;
+    params.drawMode = UsdImagingGLDrawMode::DRAW_SHADED_SMOOTH;
+
+    // Nearest to *centre*, not to camera: the latter returns the closest
+    // point anywhere in the pick cone, which on a surface angled toward the
+    // viewer sits at the cone's edge rather than under the crosshair --
+    // measured on the smoke-test sphere as an offset equal to the cone's
+    // half-width at that distance.
+    UsdImagingGLEngine::PickParams pickParams;
+    pickParams.resolveMode = HdxPickTokens->resolveNearestToCenter;
+
+    UsdImagingGLEngine::IntersectionResultVector results;
+    if (!engine->TestIntersection(pickParams, viewMatrix, projMatrix,
+                                  _stage->GetPseudoRoot(), params, &results) ||
+        results.empty()) {
+        return false;
+    }
+
+    *outHitStage = results.front().hitPoint;
+    return true;
+}
+
 bool HydraRenderer::ReadColor(int view, std::vector<uint8_t>& rgba, int& width, int& height) const
 {
     UsdImagingGLEngine* engine = _EngineFor(view);
@@ -337,6 +390,22 @@ bool HydraRenderer::ReadColor(int view, std::vector<uint8_t>& rgba, int& width, 
     }
 
     buffer->Unmap();
+
+    // Map() hands rows back bottom-up, in GL order; callers want an image,
+    // top row first. Undetected for a long time because every test render
+    // was a headlit sphere, which looks the same either way up -- an
+    // asymmetric scene showed it.
+    if (ok) {
+        const size_t         rowBytes = size_t(width) * 4;
+        std::vector<uint8_t> row(rowBytes);
+        for (int y = 0; y < height / 2; ++y) {
+            uint8_t* top    = &rgba[size_t(y) * rowBytes];
+            uint8_t* bottom = &rgba[size_t(height - 1 - y) * rowBytes];
+            std::memcpy(row.data(), top, rowBytes);
+            std::memcpy(top, bottom, rowBytes);
+            std::memcpy(bottom, row.data(), rowBytes);
+        }
+    }
     return ok;
 }
 

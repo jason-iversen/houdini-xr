@@ -9,6 +9,7 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec3d.h>
+#include <pxr/base/gf/vec4d.h>
 #include <pxr/imaging/garch/glApi.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/tokens.h>
@@ -243,20 +244,46 @@ void HxrRuntime::ThreadMain()
     std::string activeRenderer;
     bool        lastFrozen = false;
 
-    // Thumbstick locomotion: the user's accumulated displacement through the
-    // scene, in room space. Moving the user forward through the stage is the
-    // same thing as shifting the stage backward, so this is folded into the
-    // placement as a final translation by its negation. Direction follows the
-    // head's *live* horizontal heading (you move where you look), which is
-    // only known inside the render callback -- so it's the previous frame's,
-    // one frame of latency that isn't perceptible.
-    GfVec3d    locomotion(0.0, 0.0, 0.0);
+    // The user's own adjustments to where the stage sits -- thumbstick
+    // locomotion and grip orbit -- accumulated as one room-space transform,
+    // each new adjustment appended last. Holding them separately (a
+    // translation vector, then an orbit) breaks as soon as they interleave:
+    // after a 90-degree orbit the thumbstick would move you sideways, since
+    // its direction is computed in room space but would be applied in
+    // pre-orbit space. Moving the user forward is shifting the stage back.
+    // Resync clears it (Resync means "back to the camera").
+    //
+    // Head poses come from the previous frame's render callback -- one frame
+    // of latency, not perceptible.
+    GfMatrix4d userXform(1.0);
     HeadFrame  liveHead;
-    GfMatrix4d liveHeadToWorld(1.0);   // full pose, for camera placement
+    GfMatrix4d liveHeadToWorld(1.0);   // eye 0's full pose, for camera placement
     bool       haveLiveHead = false;
+    GfVec3d    eyePos[2] = {GfVec3d(0.0), GfVec3d(0.0)};
+    bool       haveEye1 = false;
     auto       lastFrameTime = std::chrono::steady_clock::now();
     constexpr double kStickDeadzone = 0.15;
     constexpr double kMaxFrameDt    = 0.1;   // don't lurch after a stall
+
+    // Grip orbit: while held, the stage rotates about the surface point under
+    // the reticle by however the right controller has turned since the grip
+    // began -- grab-and-turn, so the scene turns with the hand. Committed into
+    // userXform on release.
+    constexpr float kGripHeldThreshold = 0.5f;
+    bool       gripWasHeld = false;
+    GfVec3d    orbitPivotRoom(0.0);
+    GfMatrix4d orbitStartRotation(1.0);   // controller orientation at grip start
+    GfMatrix4d orbitLive(1.0);
+
+    // Reticle: a ray from the head centre along the gaze, picked against the
+    // scene. Picking is a render pass, so it's throttled; the stage-space hit
+    // stays glued to its surface between picks, including through an orbit.
+    constexpr double kPickInterval          = 1.0 / 15.0;
+    constexpr double kReticleMissDistance   = 2.0;   // metres, when nothing is hit
+    constexpr double kPickFovDegrees        = 0.5;   // narrow enough to act as a ray
+    GfVec3d reticleStage(0.0);
+    bool    reticleOnSurface = false;
+    auto    lastPickTime = std::chrono::steady_clock::now() - std::chrono::seconds(1);
 
     // The anchor: where the stage sits in the room. Latched once per session
     // (or on Resync), not re-evaluated every frame -- continuously following
@@ -326,11 +353,16 @@ void HxrRuntime::ThreadMain()
             configuredRenderer = newRenderer;
         }
 
-        // Effective state: the toggle, or a trigger held past half travel.
-        // Resolved here rather than in the node so a trigger pull takes
-        // effect this frame, not after a cook.
+        // Effective state: the toggle, a trigger held past half travel, or an
+        // orbit in progress. Resolved here rather than in the node so a
+        // controller press takes effect this frame, not after a cook. Grip
+        // counts for the same reason the trigger does: orbiting changes the
+        // view every frame, which would restart a progressive delegate
+        // continuously -- so it's shown live in Storm, and releasing hands
+        // back to the configured delegate (freezing there if Freeze Pose is on).
+        const bool gripHeld = xr.GripValue() > kGripHeldThreshold;
         const bool interactive =
-            _interactive.load() || xr.TriggerValue() > kTriggerHeldThreshold;
+            _interactive.load() || xr.TriggerValue() > kTriggerHeldThreshold || gripHeld;
         const bool  frozen          = !interactive && _frozen.load();
         const float convergeSeconds = interactive ? 0.0f : _convergeSeconds.load();
 
@@ -355,7 +387,10 @@ void HxrRuntime::ThreadMain()
         if (_resyncRequested.exchange(false)) {
             anchorLatched    = false;
             anchorFromCamera = false;
-            locomotion       = GfVec3d(0.0, 0.0, 0.0);   // resync means "back to the camera"
+            // Resync means "back to the camera": drop movement and orbit too.
+            userXform   = GfMatrix4d(1.0);
+            orbitLive   = GfMatrix4d(1.0);
+            gripWasHeld = false;
         }
 
         if (!xr.IsRunning()) {
@@ -380,15 +415,81 @@ void HxrRuntime::ThreadMain()
 
                 const GfVec3d forward = liveHead.forward;
                 const GfVec3d right(-forward[2], 0.0, forward[0]);
-                locomotion += (forward * deflection[1] + right * deflection[0]) *
-                              double(_moveSpeed.load()) * dt;
+                const GfVec3d step = (forward * deflection[1] + right * deflection[0]) *
+                                     double(_moveSpeed.load()) * dt;
+                userXform = userXform * Translation(-step);
             }
         }
 
         // The anchor itself is latched inside the render callback, where the
         // head pose is available. Anchor Distance/Height are read live in
         // here, so those sliders still take effect without a resync.
-        GfMatrix4d worldFromStage = computeWorldFromStage() * Translation(-locomotion);
+        const GfMatrix4d base = computeWorldFromStage();
+
+        // Head centre: midpoint of the eyes, with eye 0's orientation (the
+        // eyes are parallel). Aiming from one eye would put near hits a
+        // couple of degrees off the true line of sight.
+        GfMatrix4d headCentreToWorld = liveHeadToWorld;
+        headCentreToWorld.SetTranslateOnly(haveEye1 ? (eyePos[0] + eyePos[1]) * 0.5 : eyePos[0]);
+        const GfVec3d headCentre  = headCentreToWorld.ExtractTranslation();
+        const GfVec3d headForward = headCentreToWorld.TransformDir(GfVec3d(0.0, 0.0, -1.0));
+
+        // A pick camera at the head looking down the gaze; Hydra's view
+        // matrix is stage -> eye, i.e. stage -> room -> head.
+        auto pickAlongGaze = [&](GfMatrix4d const& worldFromStage_, GfVec3d* hitStage) {
+            GfFrustum frustum;
+            frustum.SetPerspective(kPickFovDegrees, 1.0, kNearPlane, kFarPlane);
+            return renderer.Pick(worldFromStage_ * headCentreToWorld.GetInverse(),
+                                 frustum.ComputeProjectionMatrix(), _timeCode.load(), hitStage);
+        };
+
+        // --- Grip orbit ---
+        XrPosef    aimPose{};
+        const bool aimValid = xr.RightAimPose(&aimPose);
+        auto rotationOnly = [](XrPosef const& pose) {
+            GfMatrix4d m = XrPoseToMatrix(pose);
+            m.SetTranslateOnly(GfVec3d(0.0));
+            return m;
+        };
+
+        if (gripHeld && !gripWasHeld && haveLiveHead && anchorLatched && aimValid) {
+            // Grip start. A fresh pick rather than the reticle's, which can be
+            // up to a pick interval stale. Nothing under the reticle means
+            // orbiting about where the reticle is drawn anyway.
+            const GfMatrix4d settled = base * userXform;
+            GfVec3d hitStage;
+            orbitPivotRoom = pickAlongGaze(settled, &hitStage)
+                                 ? settled.Transform(hitStage)
+                                 : headCentre + headForward * kReticleMissDistance;
+            orbitStartRotation = rotationOnly(aimPose);
+            gripWasHeld        = true;
+        }
+        if (gripHeld && gripWasHeld && aimValid) {
+            // Row-vector: the world-frame rotation taking the start
+            // orientation to the current one is start^-1 * now. Applied to
+            // the scene about the pivot, the scene turns with the hand.
+            const GfMatrix4d delta = orbitStartRotation.GetInverse() * rotationOnly(aimPose);
+            orbitLive = Translation(-orbitPivotRoom) * delta * Translation(orbitPivotRoom);
+        }
+        if (!gripHeld && gripWasHeld) {
+            userXform   = userXform * orbitLive;   // commit
+            orbitLive   = GfMatrix4d(1.0);
+            gripWasHeld = false;
+        }
+
+        // After the commit, so the release frame doesn't flash the pre-orbit
+        // placement.
+        GfMatrix4d worldFromStage = base * userXform * orbitLive;
+
+        // --- Reticle ---
+        const bool showReticle = _showReticle.load() && haveLiveHead && anchorLatched;
+        if (showReticle) {
+            const auto pickNow = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(pickNow - lastPickTime).count() >= kPickInterval) {
+                lastPickTime     = pickNow;
+                reticleOnSurface = pickAlongGaze(worldFromStage, &reticleStage);
+            }
+        }
 
         // Thumbstick click: report where the head is, in stage space, to
         // whoever wants to place a camera there. Uses the previous frame's
@@ -463,6 +564,10 @@ void HxrRuntime::ThreadMain()
         auto renderEye = [&](uint32_t index, XrView const& current) {
             HeldEye& eye = held[index];
 
+            if (index < 2) {
+                eyePos[index] = XrPoseToMatrix(current.pose).ExtractTranslation();
+                haveEye1      = haveEye1 || index == 1;
+            }
             if (index == 0) {
                 liveHeadToWorld = XrPoseToMatrix(current.pose);
                 liveHead        = HeadFrameFromPose(current.pose);
@@ -476,7 +581,7 @@ void HxrRuntime::ThreadMain()
                 anchorFromCamera = FindRenderCameraTransform(
                     renderer.Stage(), UsdTimeCode(timeCode), &stageFromCamera);
                 anchorLatched = true;
-                worldFromStage = computeWorldFromStage() * Translation(-locomotion);
+                worldFromStage = computeWorldFromStage() * userXform * orbitLive;
                 std::printf("HxrRuntime: anchor latched %s, head at (%.2f, %.2f, %.2f)\n",
                             anchorFromCamera ? "to RenderSettings camera"
                                              : "to Anchor Distance/Height",
@@ -515,7 +620,25 @@ void HxrRuntime::ThreadMain()
                 eye.image = XrViewportSession::EyeImage{
                     colour.id, colour.width, colour.height, eye.pose, eye.fov};
             }
-            return eye.image;
+
+            // Reticle on a copy, every frame: a frozen, converged eye reuses
+            // its image but the gaze still moves. Projected through the eye's
+            // *held* view, so it lines up with the geometry in that image; the
+            // compositor then reprojects both together to the live head pose.
+            XrViewportSession::EyeImage image = eye.image;
+            if (showReticle) {
+                const GfVec3d room = reticleOnSurface
+                                         ? worldFromStage.Transform(reticleStage)
+                                         : headCentre + headForward * kReticleMissDistance;
+                const GfVec4d clip =
+                    GfVec4d(room[0], room[1], room[2], 1.0) * (eye.view * eye.proj);
+                if (clip[3] > 1e-6) {   // in front of this eye
+                    image.reticleVisible = true;
+                    image.reticleNdcX    = float(clip[0] / clip[3]);
+                    image.reticleNdcY    = float(clip[1] / clip[3]);
+                }
+            }
+            return image;
         };
 
         if (!xr.RenderFrame(renderEye)) {

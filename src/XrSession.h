@@ -23,6 +23,15 @@ public:
         int      height  = 0;
         XrPosef  pose{};        // the pose this image was actually rendered from
         XrFovf   fov{};
+
+        // Reticle position in this eye's NDC (-1..1, +y up). Computed by
+        // projecting one 3D point into each eye rather than taken as each
+        // image's centre: Quest's per-eye FOVs are asymmetric, so the image
+        // centres point in different directions and a centred reticle would
+        // split in two.
+        bool  reticleVisible = false;
+        float reticleNdcX    = 0.0f;
+        float reticleNdcY    = 0.0f;
     };
 
     // Renders one eye given its current located view. The returned pose/fov
@@ -67,10 +76,22 @@ public:
     // True only on the frame the right thumbstick is clicked down.
     bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
 
+    // Right grip (squeeze), 0..1.
+    float GripValue() const { return _gripValue; }
+
+    // Right controller's aim pose in the reference space, located at the
+    // previous frame's predicted display time. False if not tracked.
+    bool RightAimPose(XrPosef* pose) const
+    {
+        *pose = _rightAimPose;
+        return _rightAimValid;
+    }
+
 private:
     bool _InitImpl(GLContext const& gl);
     bool _InitInput();
     void _SyncInput();
+    void _LocateControllers(XrTime time);
 
     XrInstance _instance = XR_NULL_HANDLE;
     XrSystemId _systemId = XR_NULL_SYSTEM_ID;
@@ -89,9 +110,15 @@ private:
     XrAction    _triggerAction    = XR_NULL_HANDLE;
     XrAction    _thumbstickAction = XR_NULL_HANDLE;
     XrAction    _thumbClickAction = XR_NULL_HANDLE;
+    XrAction    _gripAction       = XR_NULL_HANDLE;
+    XrAction    _aimPoseAction    = XR_NULL_HANDLE;
+    XrSpace     _rightAimSpace    = XR_NULL_HANDLE;
     float       _triggerValue     = 0.0f;
+    float       _gripValue        = 0.0f;
     XrVector2f  _rightThumbstick{0.0f, 0.0f};
     bool        _rightThumbstickPressed = false;
+    XrPosef     _rightAimPose{};
+    bool        _rightAimValid = false;
     bool     _running   = false;
     bool     _quit      = false;
 };

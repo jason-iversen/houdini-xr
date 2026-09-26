@@ -69,6 +69,15 @@ public:
     // has accumulated enough samples at an unchanged camera.
     bool IsConverged(int view) const;
 
+    // Nearest surface under the centre of a (narrow) pick frustum, in stage
+    // space. A pick is a render with its own camera, so it never runs on a
+    // progressive delegate's display engine -- that would reset its
+    // accumulation every time. With Storm displaying it uses that engine
+    // (Storm re-renders fully each frame anyway); otherwise a dedicated Storm
+    // engine, built on first use and dropped whenever the engines rebuild.
+    bool Pick(GfMatrix4d const& viewMatrix, GfMatrix4d const& projMatrix, double frame,
+              GfVec3d* outHitStage);
+
     // Offscreen validation path.
     bool ReadColor(int view, std::vector<uint8_t>& rgba, int& width, int& height) const;
 
@@ -104,6 +113,7 @@ private:
     HdDriver     _driver;
 
     std::vector<std::unique_ptr<UsdImagingGLEngine>> _engines;
+    std::unique_ptr<UsdImagingGLEngine>              _pickEngine;
     std::vector<Upload>                              _uploads;
 
     UsdStageRefPtr _stage;

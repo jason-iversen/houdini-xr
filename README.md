@@ -67,7 +67,8 @@ a warning badge on the node saying so).
 ## Requirements
 
 - Windows (tested on Windows 11)
-- Houdini 22.0 (tested against 22.0.432)
+- Houdini 22.0 (tested against 22.0.432 and 22.0.436; the build finds the
+  newest installed version automatically)
 - Visual Studio 2022 Build Tools, CMake 3.24+, Git
 - Meta Quest 2 or later, with Oculus Link / Air Link
 - An OpenXR runtime exposing `XR_KHR_opengl_enable` — the Oculus PC runtime
@@ -113,7 +114,8 @@ restarting Houdini each time.
 ```
 
 Options: `--renderer PluginId`, `--max-res WxH`, `--converge S`, `--frozen`,
-`--size WxH`, `--out image.bmp`, `--dist M`, `--height M`.
+`--pick`, `--reticle`, `--size WxH`, `--out image.bmp`, `--dist M`,
+`--height M`. `--reticle` draws the headset's reticle into the image.
 
 With no `--stage`, it renders a built-in sphere — enough to confirm the whole
 path works end to end.
@@ -144,6 +146,7 @@ your setup.
 | **Anchor Height** | How high the stage sits (metres) |
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
 | **Move Speed** | Thumbstick locomotion speed, metres per second |
+| **Show Reticle** | The gaze crosshair; turn off for a clean look at a converged frame |
 | **Apply Camera Placement** | Author the RenderSettings camera from the placement keys below |
 | **Placement Translate / Rotate** | The placed camera's pose in stage space — keyed by the thumbstick click |
 
@@ -154,10 +157,19 @@ your setup.
 | Either trigger (held) | Interactive Placement while held — live Storm view |
 | Right thumbstick | Move: forward/back and strafe, relative to where you're looking |
 | Right thumbstick click | **Place the camera** where your head is, at the current frame |
+| Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle |
+
+**The reticle** is the crosshair in the centre of your view. It sits *on* the
+surface you're looking at (not floating in front of it), which is also the
+point a grip orbit turns around. Hold the right grip and turn the controller —
+the scene turns with your hand, pivoting on that point. Release, and the new
+view stays. Like the trigger, holding the grip shows a live Storm view, so
+orbiting stays smooth even with Karma selected; releasing hands back to your
+renderer.
 
 Moving with the thumbstick is smooth locomotion — it doesn't change your
 tracked position, it moves the scene around you. **Resync Camera** puts you
-back at the camera.
+back at the camera, undoing both movement and orbit.
 
 **Placing the camera.** Walk the scene, line up the view you want, and click
 the right thumbstick. That keys your head's position and orientation (pitch

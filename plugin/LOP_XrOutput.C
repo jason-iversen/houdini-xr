@@ -123,6 +123,7 @@ static PRM_Name theDistName("dist", "Anchor Distance");
 static PRM_Name theHeightName("height", "Anchor Height");
 static PRM_Name theResyncName("resync", "Resync Camera");
 static PRM_Name theMoveSpeedName("movespeed", "Move Speed");
+static PRM_Name theShowReticleName("showreticle", "Show Reticle");
 static PRM_Name theApplyPlacementName("applyplacement", "Apply Camera Placement");
 static PRM_Name thePlaceTranslateName("pt", "Placement Translate");
 static PRM_Name thePlaceRotateName("pr", "Placement Rotate");
@@ -207,6 +208,9 @@ LOP_XrOutput::myTemplateList[] = {
                 &LOP_XrOutput::onResyncCamera),
     // Right-thumbstick locomotion, metres per second at full deflection.
     PRM_Template(PRM_FLT,    1, &theMoveSpeedName, &theMoveSpeedDefault),
+    // Gaze reticle; also marks the pivot a right-grip orbit turns about.
+    // Worth turning off for a clean look at a converged frame.
+    PRM_Template(PRM_TOGGLE, 1, &theShowReticleName, PRMoneDefaults),
     // Camera placement. Clicking the right thumbstick in the headset keys
     // the head's stage-space pose onto pt/pr at the current frame and turns
     // Apply on; cookMyLop then authors the RenderSettings camera from them.
@@ -339,6 +343,7 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     myRuntime->SetConvergeSeconds(float(evalFloat(theConvergeName, 0, t)));
     myRuntime->SetFrozen(evalInt(theFrozenName, 0, t) != 0);
     myRuntime->SetMoveSpeed(float(evalFloat(theMoveSpeedName, 0, t)));
+    myRuntime->SetShowReticle(evalInt(theShowReticleName, 0, t) != 0);
 
     // HUSD authors USD time samples using the Houdini frame number (not
     // context.getTime(), which is seconds), so this is what keeps the

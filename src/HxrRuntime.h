@@ -61,6 +61,10 @@ public:
     // second. Movement is relative to the head's horizontal heading.
     void SetMoveSpeed(float metresPerSecond) { _moveSpeed = metresPerSecond; }
 
+    // The gaze reticle. It sits on the surface under the line of sight, and
+    // marks the pivot a right-grip orbit will turn about.
+    void SetShowReticle(bool show) { _showReticle = show; }
+
     // Invoked, ON THE RENDER THREAD, when the right thumbstick is clicked:
     // the head's full pose (position and orientation, pitch included) in
     // *stage* coordinates -- i.e. the transform a camera prim would need to
@@ -131,6 +135,7 @@ private:
     std::atomic<bool>   _interactive{false};
     std::atomic<bool>   _refreezeRequested{false};
     std::atomic<float>  _moveSpeed{1.5f};
+    std::atomic<bool>   _showReticle{true};
 
     std::mutex     _stageMutex;
     UsdStageRefPtr _pendingStage;

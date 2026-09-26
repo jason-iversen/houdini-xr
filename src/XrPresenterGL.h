@@ -18,9 +18,11 @@ public:
 
     XrSwapchain Swapchain(uint32_t view) const { return _views[view].swapchain; }
 
-    // Acquire, blit the source GL texture in, release. The source may be
-    // smaller than the swapchain image; the blit scales it up to fill.
-    bool PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight);
+    // Acquire, blit the source GL texture in, overlay the reticle, release.
+    // The source may be smaller than the swapchain image; the blit scales it
+    // up to fill. The reticle position is in this eye's NDC.
+    bool PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight,
+                    bool reticleVisible, float reticleNdcX, float reticleNdcY);
 
 private:
     struct ViewSwapchain

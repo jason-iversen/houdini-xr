@@ -5,15 +5,18 @@
 #include "GLContext.h"
 #include "HxrRuntime.h"
 #include "HydraRenderer.h"
+#include "Reticle.h"
 #include "XrPlatform.h"
 
 #include <pxr/base/gf/frustum.h>
 #include <pxr/base/gf/vec3d.h>
+#include <pxr/base/gf/vec4d.h>
 #include <pxr/imaging/garch/glApi.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/sphere.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -33,6 +36,8 @@ struct Options
     int   maxHeight = 0;
     float converge  = 1.0f; // seconds to hold a pose for a progressive delegate
     bool  frozen    = false;
+    bool  pick      = false; // offscreen: also pick along the view centre
+    bool  reticle   = false; // offscreen: draw the reticle into the image
     int  width  = 1280;
     int  height = 720;
     bool  xr     = false;
@@ -126,9 +131,14 @@ Options ParseArgs(int argc, char** argv)
             opts.converge = std::stof(argv[++i]);
         } else if (arg == "--frozen") {
             opts.frozen = true;
+        } else if (arg == "--pick") {
+            opts.pick = true;
+        } else if (arg == "--reticle") {
+            opts.reticle = true;
         } else {
             std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--frames N]"
                         " [--renderer PluginId] [--max-res WxH] [--converge S] [--frozen]"
+                        " [--pick] [--reticle]"
                         " [--dist M] [--height M] [--out image.bmp] [--size WxH]\n");
         }
     }
@@ -183,6 +193,76 @@ bool WriteBmp(std::string const& path, std::vector<uint8_t> const& rgba, int w, 
     return out.good();
 }
 
+uint8_t EncodeSrgb8(float linear)
+{
+    const float c = std::fmin(std::fmax(linear, 0.0f), 1.0f);
+    const float s = (c <= 0.0031308f) ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+    return uint8_t(s * 255.0f + 0.5f);
+}
+
+uint8_t EncodeLinear8(float v)
+{
+    return uint8_t(std::fmin(std::fmax(v, 0.0f), 1.0f) * 255.0f + 0.5f);
+}
+
+// The offscreen twin of XrPresenterGL::PresentEye: blit the colour AOV into a
+// target of our own, draw the reticle with the same DrawReticle the headset
+// uses, read it back. Rows come back top-down and sRGB-encoded, for WriteBmp.
+bool ComposeWithReticle(HydraRenderer& renderer, float ndcX, float ndcY,
+                        std::vector<uint8_t>& rgba, int& w, int& h)
+{
+    const HydraRenderer::ColorTexture colour = renderer.GetColorTexture(0);
+    if (!colour.id) {
+        return false;
+    }
+    w = colour.width;
+    h = colour.height;
+
+    // Float target: the blit copies Hydra's linear values untouched, leaving
+    // one sRGB encode below -- the same single encode the headset's sRGB
+    // swapchain performs.
+    GLuint target = 0;
+    glGenTextures(1, &target);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    GLuint readFbo = 0;
+    GLuint drawFbo = 0;
+    glGenFramebuffers(1, &readFbo);
+    glGenFramebuffers(1, &drawFbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colour.id, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, drawFbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+
+    glDisable(GL_SCISSOR_TEST);   // blits honour it; see XrPresenterGL
+    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    DrawReticle(w, h, ndcX, ndcY);
+
+    std::vector<float> texels(size_t(w) * size_t(h) * 4);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, drawFbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_FLOAT, texels.data());
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &readFbo);
+    glDeleteFramebuffers(1, &drawFbo);
+    glDeleteTextures(1, &target);
+
+    // glReadPixels returns the bottom row first; WriteBmp wants the top first.
+    rgba.resize(size_t(w) * size_t(h) * 4);
+    for (int y = 0; y < h; ++y) {
+        const float* src = &texels[size_t(h - 1 - y) * size_t(w) * 4];
+        uint8_t*     dst = &rgba[size_t(y) * size_t(w) * 4];
+        for (int i = 0; i < w * 4; ++i) {
+            dst[i] = (i % 4 == 3) ? EncodeLinear8(src[i]) : EncodeSrgb8(src[i]);
+        }
+    }
+    return true;
+}
+
 int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
 {
     HydraRenderer renderer;
@@ -198,6 +278,34 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
 
     GfFrustum frustum;
     frustum.SetPerspective(60.0, double(opts.width) / double(opts.height), 0.1, 1000.0);
+
+    // Reticle, as the headset places it: pick the gaze ray (here the view
+    // centre), fall back to a fixed distance on a miss, project the result
+    // back into the view. Picked before rendering, mirroring the headset's
+    // pick -> render -> present order, since a pick is itself a render.
+    float reticleNdcX = 0.0f;
+    float reticleNdcY = 0.0f;
+    if (opts.reticle) {
+        GfFrustum pickFrustum;
+        pickFrustum.SetPerspective(0.5, 1.0, 0.1, 1000.0);
+        const GfMatrix4d camToWorld = view.GetInverse();
+
+        GfVec3d    aim;
+        const bool onSurface =
+            renderer.Pick(view, pickFrustum.ComputeProjectionMatrix(), 0.0, &aim);
+        if (!onSurface) {
+            aim = camToWorld.ExtractTranslation() +
+                  camToWorld.TransformDir(GfVec3d(0.0, 0.0, -1.0)) * 2.0;
+        }
+
+        const GfVec4d clip = GfVec4d(aim[0], aim[1], aim[2], 1.0) *
+                             (view * frustum.ComputeProjectionMatrix());
+        reticleNdcX = float(clip[0] / clip[3]);
+        reticleNdcY = float(clip[1] / clip[3]);
+        std::printf("Reticle %s at (%.3f, %.3f, %.3f), NDC (%.3f, %.3f)\n",
+                    onSurface ? "on surface" : "at miss distance",
+                    aim[0], aim[1], aim[2], reticleNdcX, reticleNdcY);
+    }
 
     // Progressive delegates need repeated passes at a fixed camera; keep
     // going until converged or the convergence budget is spent.
@@ -218,7 +326,10 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
     std::vector<uint8_t> pixels;
     int w = 0;
     int h = 0;
-    if (!renderer.ReadColor(0, pixels, w, h)) {
+    const bool read = opts.reticle
+                          ? ComposeWithReticle(renderer, reticleNdcX, reticleNdcY, pixels, w, h)
+                          : renderer.ReadColor(0, pixels, w, h);
+    if (!read) {
         return 1;
     }
     if (!WriteBmp(opts.outPath, pixels, w, h)) {
@@ -229,6 +340,21 @@ int RunOffscreen(Options const& opts, UsdStageRefPtr const& stage)
     std::printf("Wrote %dx%d -> %s\n", w, h, opts.outPath.c_str());
     const HydraRenderer::ColorTexture colour = renderer.GetColorTexture(0);
     std::printf("Colour AOV GL texture id: %u (%dx%d)\n", colour.id, colour.width, colour.height);
+
+    // The same narrow-frustum pick the headset reticle uses, down the view
+    // centre. Verifies without hardware that hits come back in stage space.
+    // For the built-in sphere (r=1 at the origin, camera at (0,1.5,6)) the
+    // expected front-surface hit is (0, 0.243, 0.970).
+    if (opts.pick) {
+        GfFrustum pickFrustum;
+        pickFrustum.SetPerspective(0.5, 1.0, 0.1, 1000.0);
+        GfVec3d hit;
+        if (renderer.Pick(view, pickFrustum.ComputeProjectionMatrix(), 0.0, &hit)) {
+            std::printf("Pick hit (stage space): (%.3f, %.3f, %.3f)\n", hit[0], hit[1], hit[2]);
+        } else {
+            std::printf("Pick: no hit\n");
+        }
+    }
 
     return 0;
 }

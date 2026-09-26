@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 namespace {
 
@@ -168,6 +169,22 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    XrActionCreateInfo gripInfo{XR_TYPE_ACTION_CREATE_INFO};
+    gripInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    std::strncpy(gripInfo.actionName, "orbit", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(gripInfo.localizedActionName, "Orbit", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &gripInfo, &_gripAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo aimInfo{XR_TYPE_ACTION_CREATE_INFO};
+    aimInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    std::strncpy(aimInfo.actionName, "aim", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(aimInfo.localizedActionName, "Aim", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &aimInfo, &_aimPoseAction), "xrCreateAction")) {
+        return false;
+    }
+
     auto path = [this](const char* s) {
         XrPath p = XR_NULL_PATH;
         xrStringToPath(_instance, s, &p);
@@ -185,10 +202,12 @@ bool XrViewportSession::_InitInput()
             {_triggerAction,    path("/user/hand/right/input/trigger/value")},
             {_thumbstickAction, path("/user/hand/right/input/thumbstick")},
             {_thumbClickAction, path("/user/hand/right/input/thumbstick/click")},
+            {_gripAction,       path("/user/hand/right/input/squeeze/value")},
+            {_aimPoseAction,    path("/user/hand/right/input/aim/pose")},
         };
         XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         suggested.interactionProfile     = path("/interaction_profiles/oculus/touch_controller");
-        suggested.countSuggestedBindings = 4;
+        suggested.countSuggestedBindings = uint32_t(std::size(bindings));
         suggested.suggestedBindings      = bindings;
         anyAccepted |= XR_SUCCEEDED(xrSuggestInteractionProfileBindings(_instance, &suggested));
     }
@@ -211,12 +230,44 @@ bool XrViewportSession::_InitInput()
     XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     attachInfo.countActionSets = 1;
     attachInfo.actionSets      = &_actionSet;
-    return !Failed(xrAttachSessionActionSets(_session, &attachInfo), "xrAttachSessionActionSets");
+    if (Failed(xrAttachSessionActionSets(_session, &attachInfo), "xrAttachSessionActionSets")) {
+        return false;
+    }
+
+    // A pose action is read by locating a space bound to it, not by
+    // xrGetActionState. Failing here only loses orbit; the rest still works.
+    XrActionSpaceCreateInfo spaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    spaceInfo.action = _aimPoseAction;
+    spaceInfo.subactionPath = XR_NULL_PATH;
+    spaceInfo.poseInActionSpace.orientation.w = 1.0f;
+    if (Failed(xrCreateActionSpace(_session, &spaceInfo, &_rightAimSpace), "xrCreateActionSpace")) {
+        _rightAimSpace = XR_NULL_HANDLE;
+    }
+    return true;
+}
+
+void XrViewportSession::_LocateControllers(XrTime time)
+{
+    _rightAimValid = false;
+    if (_rightAimSpace == XR_NULL_HANDLE) {
+        return;
+    }
+
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    if (XR_SUCCEEDED(xrLocateSpace(_rightAimSpace, _space, time, &location))) {
+        const XrSpaceLocationFlags needed =
+            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        if ((location.locationFlags & needed) == needed) {
+            _rightAimPose  = location.pose;
+            _rightAimValid = true;
+        }
+    }
 }
 
 void XrViewportSession::_SyncInput()
 {
     _triggerValue           = 0.0f;
+    _gripValue              = 0.0f;
     _rightThumbstick        = {0.0f, 0.0f};
     _rightThumbstickPressed = false;
     if (_actionSet == XR_NULL_HANDLE) {
@@ -252,6 +303,12 @@ void XrViewportSession::_SyncInput()
     XrActionStateBoolean click{XR_TYPE_ACTION_STATE_BOOLEAN};
     if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &click)) && click.isActive) {
         _rightThumbstickPressed = click.changedSinceLastSync && click.currentState;
+    }
+
+    getInfo.action = _gripAction;
+    XrActionStateFloat grip{XR_TYPE_ACTION_STATE_FLOAT};
+    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &grip)) && grip.isActive) {
+        _gripValue = grip.currentState;
     }
 }
 
@@ -296,6 +353,9 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
         return false;
     }
 
+    // Needs the predicted display time, so it can't live in _SyncInput.
+    _LocateControllers(frameState.predictedDisplayTime);
+
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     if (Failed(xrBeginFrame(_session, &beginInfo), "xrBeginFrame")) {
         return false;
@@ -324,7 +384,9 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
 
             for (uint32_t i = 0; i < located; ++i) {
                 const EyeImage image = renderEye(i, _views[i]);
-                if (!_presenter.PresentEye(i, image.texture, image.width, image.height)) {
+                if (!_presenter.PresentEye(i, image.texture, image.width, image.height,
+                                           image.reticleVisible,
+                                           image.reticleNdcX, image.reticleNdcY)) {
                     return false;
                 }
 
@@ -361,6 +423,11 @@ void XrViewportSession::Shutdown()
 {
     _presenter.Destroy();
 
+    if (_rightAimSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(_rightAimSpace);
+        _rightAimSpace = XR_NULL_HANDLE;
+    }
+
     // Destroying the set destroys its actions.
     if (_actionSet != XR_NULL_HANDLE) {
         xrDestroyActionSet(_actionSet);
@@ -368,6 +435,8 @@ void XrViewportSession::Shutdown()
         _triggerAction    = XR_NULL_HANDLE;
         _thumbstickAction = XR_NULL_HANDLE;
         _thumbClickAction = XR_NULL_HANDLE;
+        _gripAction       = XR_NULL_HANDLE;
+        _aimPoseAction    = XR_NULL_HANDLE;
     }
 
     if (_space != XR_NULL_HANDLE) {

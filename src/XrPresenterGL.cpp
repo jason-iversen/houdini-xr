@@ -1,4 +1,5 @@
 #include "XrPresenterGL.h"
+#include "Reticle.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -73,7 +74,8 @@ bool XrPresenterGL::CreateSwapchains(XrSession session, uint32_t width, uint32_t
     return true;
 }
 
-bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight)
+bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight,
+                               bool reticleVisible, float reticleNdcX, float reticleNdcY)
 {
     ViewSwapchain& target = _views[view];
 
@@ -114,6 +116,14 @@ bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     if (_srgb) {
         glDisable(GL_FRAMEBUFFER_SRGB);
+    }
+
+    // Into the swapchain image after the blit, so the compositor reprojects
+    // it along with the frame and it stays locked to the held pose's
+    // geometry. NDC maps straight onto swapchain pixels whatever the render
+    // size was, since the blit stretches to fill.
+    if (reticleVisible) {
+        DrawReticle(int(_width), int(_height), reticleNdcX, reticleNdcY);
     }
 
     if (scissorWasEnabled) {

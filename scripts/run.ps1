@@ -2,8 +2,15 @@
 # a declared parameter would swallow leading "--flag" tokens before $args sees them.
 # Overrides come from the environment instead: HXR_HFS, HXR_CONFIG.
 
+# Newest install by default; see build.ps1 for why this isn't pinned.
 $hfs = if ($env:HXR_HFS) { $env:HXR_HFS }
-       else { "C:\Program Files\Side Effects Software\Houdini 22.0.432" }
+       else {
+           Get-ChildItem "C:\Program Files\Side Effects Software" -Directory -ErrorAction Ignore |
+               Where-Object { $_.Name -match '^Houdini \d+\.\d+\.\d+$' } |
+               Sort-Object { [version]($_.Name -replace '^Houdini ', '') } |
+               Select-Object -Last 1 -ExpandProperty FullName
+       }
+if (-not $hfs) { throw "No Houdini install found; set HXR_HFS" }
 
 $config = if ($env:HXR_CONFIG) { $env:HXR_CONFIG } else { "Release" }
 

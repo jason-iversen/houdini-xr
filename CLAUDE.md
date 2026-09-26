@@ -29,16 +29,28 @@ plugin DLL and `build.cmd` then fails at link while `hxr` itself is fine:
 cmake --build build --config Release --target hxr
 ```
 
-Point at a different Houdini install (the cached `HFS` is baked at configure
-time, so this needs a fresh `build/` or a re-configure):
+The build uses the **newest** Houdini under `C:\Program Files\Side Effects
+Software` automatically — point releases delete the old directory, so a pinned
+version breaks on every update (this happened: 22.0.432 → 22.0.436). To pin
+one, pass it explicitly; `build.cmd` re-passes `-DHFS` on every configure,
+which also refreshes a stale cached value:
 
 ```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DHFS="C:/Program Files/Side Effects Software/Houdini 22.0.432"
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DHFS="C:/Program Files/Side Effects Software/Houdini 22.0.436"
 ```
 
+After a Houdini update, rebuild the plugin before launching — the deployed DLL
+is linked against the previous install's libraries.
+
 `run.cmd` flags: `--stage file.usd`, `--renderer PluginId`, `--max-res WxH`,
-`--converge S`, `--frozen`, `--frames N`, `--size WxH`, `--dist M`,
-`--height M`, `--out image.bmp`.
+`--converge S`, `--frozen`, `--pick`, `--reticle`, `--frames N`, `--size WxH`,
+`--dist M`, `--height M`, `--out image.bmp`.
+
+The offscreen camera is fixed at (0, 1.5, 6) looking at the origin — it does
+not use the stage's RenderSettings camera — so scenes that aren't a few metres
+across and centred on the origin won't be well framed. Write test output to
+the scratchpad rather than the project root; `.gitignore` only covers
+`hxr_frame*`.
 
 There is **no linter, formatter, or test framework** configured — see
 [Verification](#verification) for what stands in for a test suite.
@@ -64,6 +76,7 @@ src/            # hxr_core — pure USD/Hydra/OpenXR/WGL, no Houdini HDK
   XrPresenterGL.* Per-eye swapchains; blits the AOV texture in
   XrMath.h        XrPosef/XrFovf -> GfMatrix4d, via GfFrustum
   RenderCamera.*  Resolves the stage's RenderSettings -> camera path/transform
+  Reticle.*       Draws the reticle into the bound framebuffer (headset + offscreen)
   HxrRuntime.*    Owns the render thread; the seam both consumers share
   main.cpp        Standalone harness (offscreen / --xr / --probe)
 plugin/         # LOP_HoudiniXR — the Houdini side
@@ -186,11 +199,66 @@ The same transform folds in the stage's `metersPerUnit` and `upAxis`
 (`StageToRoomUnits`), since XR poses are always metres and Y-up. Without that
 a centimetre or Z-up stage renders 100× too large or on its side.
 
-**Locomotion** is an accumulated room-space displacement folded into the
-placement as a final `Translation(-locomotion)` — moving the user forward is
-shifting the stage backward. Direction follows the *live* head heading from
-the previous frame's callback. Reset by Resync (which means "back to the
-camera").
+**The user's own adjustments — locomotion and grip orbit — live in one
+accumulated room-space transform, `userXform`**, each new adjustment appended
+last: `worldFromStage = base * userXform * orbitLive`. They must share one
+transform. They were briefly separate (a locomotion translation vector, then
+an orbit composed after it), which breaks as soon as they interleave: after a
+90° orbit the thumbstick moved you sideways, since its direction is computed
+in room space but was applied in pre-orbit space. Moving the user forward is
+shifting the stage backward, so locomotion appends `Translation(-step)`.
+Direction follows the *live* head heading from the previous frame's callback.
+Resync clears `userXform` (Resync means "back to the camera").
+
+### Reticle and grip orbit
+
+**The reticle is one 3D point projected into each eye**, never each image's
+centre. Quest's per-eye FOVs are asymmetric, so the two image centres point in
+different directions and a centred reticle would split in two. Projecting the
+*hit point* also gives correct stereo depth — it sits on the surface instead
+of floating in front of it (a depth conflict that's uncomfortable to look at).
+It's projected through the eye's **held** view so it lines up with the
+geometry in that image; the compositor reprojects both together. It's drawn by
+`DrawReticle` (`Reticle.cpp`) with scissored `glClear`s after the blit — no
+shaders, buffers or VAOs, so nothing can leak into Hydra's next pass — and it
+saves/restores scissor box and clear colour. It's a free function shared by
+`XrPresenterGL` and the offscreen `--reticle` path, so a test image exercises
+the headset's own drawing code rather than a stand-in. It's recomputed on a *copy* of the
+eye image every frame, since a frozen, converged eye reuses its image while the
+gaze still moves.
+
+The gaze ray starts at the **head centre** (midpoint of the two eyes, eye 0's
+orientation) — aiming from one eye puts near hits a couple of degrees off.
+
+**Picking** (`HydraRenderer::Pick`, the non-deprecated
+`TestIntersection(PickParams, …)`) is a render pass, so it's throttled to
+~15Hz for the reticle, plus a fresh pick on grip press. **It never runs on a
+progressive delegate's display engine** — a pick has its own camera, which
+would reset Karma's accumulation on every reticle update and break frozen-pose.
+With Storm displaying it uses engine 0 (Storm re-renders fully anyway);
+otherwise a dedicated Storm engine sharing the same `Hgi`, built on first use
+and dropped in `_CreateEngines` (the `_isPopulated` trap applies to it too).
+Hits come back in the space the view matrix factors out of — **stage** space,
+since we hand Hydra `worldFromStage * eyeView`. Use
+`HdxPickTokens->resolveNearestToCenter`, **not** `resolveNearestToCamera`: the
+latter returns the closest point anywhere in the pick cone, which on a surface
+angled toward the viewer lands at the cone's edge. Measured with `--pick` on
+the smoke-test sphere: NearestToCamera was off-axis by exactly the cone's
+half-width (0.023m at 5.2m); NearestToCenter lands on the ray.
+
+**Grip orbit** (right squeeze + right aim pose): on press, pick for the pivot
+(falling back to the reticle's miss distance) and record the controller's
+orientation. While held, `orbitLive = T(-pivot) * (start⁻¹ * now) * T(pivot)`
+— row-vector, the world-frame rotation from start to current, applied about
+the pivot, so the scene turns *with* the hand (grab-and-turn; flip the delta
+to reverse). On release it's committed into `userXform`, and the final
+`worldFromStage` is computed **after** that commit — otherwise the release
+frame renders the pre-orbit placement for one frame, a visible flicker. Grip
+also counts as effective-interactive (Storm while held), for the same reason
+as the trigger: orbiting changes the view every frame, which would restart a
+progressive delegate continuously. The controller pose comes from an OpenXR
+action space located after `xrWaitFrame` (it needs the predicted display
+time), so it can't live in `_SyncInput`.
 
 ### Camera placement crosses the thread boundary the other way
 
@@ -252,7 +320,7 @@ Re-verify rather than trusting these if the Houdini version changes.
 
 | Fact | Value |
 |---|---|
-| Houdini | 22.0.432, `C:\Program Files\Side Effects Software\Houdini 22.0.432` |
+| Houdini | 22.0.436 (was 22.0.432; the upgrade changed nothing below) |
 | USD | 26.05 (`PXR_VERSION` 2605), SideFX's own fork |
 | Namespace | standard `pxr` (no custom SideFX namespace) |
 | Toolchain | MSVC 2022, C++20, `/MD /bigobj /EHsc /permissive-` |
@@ -276,6 +344,15 @@ Non-obvious constraints, each of which cost real debugging time:
   `Py_NoneStruct` / boost-python converter symbols.
 - **The colour AOV is `HdFormatFloat16Vec4`** (linear half-float), not 8-bit.
   Readback must convert and sRGB-encode.
+- **`HdRenderBuffer::Map()` returns rows bottom-up** (GL order).
+  `HydraRenderer::ReadColor` flips them so callers get an image, top row
+  first. Before that fix every offscreen test image was upside down, and it
+  went unnoticed all through development because every test render was a
+  headlit sphere, which is radially symmetric. The headset path never read
+  back, so it was never affected. **Use an asymmetric scene to check
+  orientation** — a symmetric one proves nothing. Verified by rendering one
+  both through `ReadColor` and through blit + `glReadPixels` (`--reticle`):
+  pixel-identical away from the reticle, 0 of 25,300 sampled pixels differing.
 - **`SetEnablePresentation(false)`** — we own presentation (offscreen readback
   or XR swapchain blit), so letting the engine composite only drags in
   `hgiInterop` for nothing.
@@ -297,9 +374,10 @@ Non-obvious constraints, each of which cost real debugging time:
   directory. `run.ps1` also imports Houdini's environment from `hconfig`.
 - **Karma cannot run in the standalone exe.** It resolves `opdef:` shader paths
   through Houdini's operator framework (OP director + HDA library), which only
-  exists in a real Houdini process — it segfaults without it. This is not an
-  env-var problem. Karma is plugin-only; the standalone tool validates the
-  generic delegate mechanism with Storm.
+  exists in a real Houdini process. Without it Karma still initialises and
+  renders, but produces an all-zero (black) image, then crashes on the way
+  out. This is not an env-var problem. Karma is plugin-only; the standalone
+  tool validates the generic delegate mechanism with Storm.
 
 ---
 
@@ -366,14 +444,17 @@ captured is forced to capture regardless of the frame-level decision.
 Node parameters: `Live`, `Interactive Placement`, `Renderer`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
 `Anchor Distance`, `Anchor Height`, `Resync Camera`, `Move Speed`,
-`Apply Camera Placement`, `Placement Translate`, `Placement Rotate`.
+`Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
+`Placement Rotate`.
 
 **Controller input** (`XrViewportSession`, one action set): trigger (float,
 both hands), right thumbstick (Vector2f), right thumbstick click (boolean,
-edge via `changedSinceLastSync`). Synced at the top of every `RenderFrame`;
-all read as zero when the session isn't focused. In the headset: trigger held
-= interactive placement, thumbstick = move, thumbstick click = place the
-camera at the head.
+edge via `changedSinceLastSync`), right squeeze (float), right aim pose (via
+an action space). Actions sync at the top of every `RenderFrame`; the aim
+pose is located after `xrWaitFrame`. All read as zero / invalid when the
+session isn't focused. In the headset: trigger held = interactive placement,
+thumbstick = move, thumbstick click = place the camera at the head, grip held
++ turn = orbit about the reticle.
 
 ---
 
@@ -386,6 +467,15 @@ There is no test suite. These stand in for one:
   the engine built, `Converged: yes after 1 pass`, and the written file.
 - **`--probe`** answers "does the active OpenXR runtime support what we need"
   and "which delegates are registered", with no headset and no session.
+- **`--reticle`** (offscreen) draws the reticle into the written image, via
+  the headset's own sequence: pick → project → blit → `DrawReticle` → read
+  back. The pick runs *before* the render, as in the headset, since a pick is
+  itself a render.
+- **`--pick`** (offscreen) runs the reticle's narrow-frustum pick down the view
+  centre. On the built-in sphere a correct result is ≈`(0, 0.240, 0.960)` —
+  on the gaze ray, radius ~0.99 because Storm tessellates the sphere into
+  facets that sit just inside the true surface. A point near `z = -5` would
+  mean hits came back in camera space rather than stage space.
 - **`--xr`** needs the Quest connected via Link/Air Link. A successful start
   prints reference space, swapchain size (2080x2096 per eye on Quest 2),
   `Session running.`, and the frame count on exit.
@@ -405,7 +495,8 @@ in the plugin.
 
 Built but **not yet confirmed in-headset**: head-anchored placement (replacing
 the origin-anchored version), thumbstick locomotion, thumbstick-click camera
-placement, trigger-driven interactive placement.
+placement, trigger-driven interactive placement, the reticle, grip orbit. (The
+pick underneath the reticle and orbit *is* verified, offscreen, via `--pick`.)
 
 Open questions, deliberately instrumented rather than assumed:
 

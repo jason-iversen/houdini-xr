@@ -11,8 +11,24 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
-set(HFS "C:/Program Files/Side Effects Software/Houdini 22.0.432"
-    CACHE PATH "Houdini install root (HFS)")
+# Default to the newest install found rather than a pinned version: Houdini
+# point releases remove the old directory, which otherwise breaks the build
+# with a stale cached path. Override with -DHFS=... to pin a specific one.
+if(NOT DEFINED HFS)
+  file(GLOB _houdini_installs "C:/Program Files/Side Effects Software/Houdini *")
+  list(FILTER _houdini_installs INCLUDE REGEX "Houdini [0-9]+\\.[0-9]+\\.[0-9]+$")
+  if(_houdini_installs)
+    list(SORT _houdini_installs COMPARE NATURAL ORDER DESCENDING)
+    list(GET _houdini_installs 0 _houdini_newest)
+  endif()
+endif()
+
+set(HFS "${_houdini_newest}" CACHE PATH "Houdini install root (HFS)")
+
+if(NOT HFS OR NOT EXISTS "${HFS}")
+  message(FATAL_ERROR
+    "No Houdini install found. Pass -DHFS=\"<houdini install dir>\" to cmake.")
+endif()
 
 set(_pxr_inc "${HFS}/toolkit/include")
 set(_pxr_lib "${HFS}/custom/houdini/dsolib")
@@ -80,7 +96,8 @@ add_library(hxr_core OBJECT
   src/XrPresenterGL.cpp
   src/XrSession.cpp
   src/HxrRuntime.cpp
-  src/RenderCamera.cpp)
+  src/RenderCamera.cpp
+  src/Reticle.cpp)
 target_include_directories(hxr_core PUBLIC "${_pxr_inc}" "${_py_inc}" src)
 target_compile_options(hxr_core PRIVATE ${_hxr_compile_options})
 target_compile_definitions(hxr_core PRIVATE ${_hxr_defines})
