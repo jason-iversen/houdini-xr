@@ -1,28 +1,47 @@
-# houdini-xr
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 An XR viewport for SideFX Houdini, targeting Meta Quest 2 and later over PCVR
 (Link / Air Link). Houdini's own Scene Viewer is not involved: this renders the
-LOP stage with **Hydra/Storm** and presents it to an **OpenXR** compositor,
-either from a standalone test harness or from inside Houdini as an HDK LOP
-plugin.
+LOP stage with **Hydra** (Storm by default) and presents it to an **OpenXR**
+compositor, either from a standalone test harness or from inside Houdini as an
+HDK LOP plugin.
 
 Quest hardware is ARM/Android and Houdini is x86 desktop-only, so this is
 inherently PCVR — Houdini runs on the PC, frames are streamed to the headset.
 
 ---
 
-## Quick start
+## Commands
 
 ```bash
-./scripts/build.cmd          # configure + build all targets
-./scripts/run.cmd --probe    # list the active OpenXR runtime's extensions
-./scripts/run.cmd            # offscreen: render one frame to hxr_frame.bmp
-./scripts/run.cmd --xr       # stereo session to the headset (Ctrl+C to stop)
+./scripts/build.cmd                  # configure + build all three targets
+./scripts/run.cmd --probe            # OpenXR runtime extensions + registered delegates
+./scripts/run.cmd                    # offscreen: render one frame to hxr_frame.bmp
+./scripts/run.cmd --xr               # stereo session to the headset (Ctrl+C to stop)
 ```
 
-Useful flags: `--stage file.usd`, `--renderer PluginId`, `--max-res WxH`,
+Build a single target — needed often, because Houdini holds a lock on the
+plugin DLL and `build.cmd` then fails at link while `hxr` itself is fine:
+
+```bash
+cmake --build build --config Release --target hxr
+```
+
+Point at a different Houdini install (the cached `HFS` is baked at configure
+time, so this needs a fresh `build/` or a re-configure):
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DHFS="C:/Program Files/Side Effects Software/Houdini 22.0.432"
+```
+
+`run.cmd` flags: `--stage file.usd`, `--renderer PluginId`, `--max-res WxH`,
 `--converge S`, `--frozen`, `--frames N`, `--size WxH`, `--dist M`,
 `--height M`, `--out image.bmp`.
+
+There is **no linter, formatter, or test framework** configured — see
+[Verification](#verification) for what stands in for a test suite.
 
 **Use the `.cmd` wrappers, not the `.ps1` files directly.** This project lives
 on `G:\My Drive`, a Google Drive virtual mount that `fsutil` reports as FAT32.
@@ -41,10 +60,10 @@ src/            # hxr_core — pure USD/Hydra/OpenXR/WGL, no Houdini HDK
   HydraRenderer.* UsdImagingGLEngine wrapper; selectable delegate, per-eye
                   render, AOV readback, CPU->GL upload for non-GL delegates
   XrPlatform.h    Correct include order for OpenXR's GL headers
-  XrSession.*     OpenXR instance/system/session lifecycle + frame loop
-  XrPresenterGL.* Per-eye swapchains; blits Storm's AOV texture in
+  XrSession.*     OpenXR instance/system/session lifecycle, input, frame loop
+  XrPresenterGL.* Per-eye swapchains; blits the AOV texture in
   XrMath.h        XrPosef/XrFovf -> GfMatrix4d, via GfFrustum
-  RenderCamera.*  Resolves the stage's RenderSettings -> camera transform
+  RenderCamera.*  Resolves the stage's RenderSettings -> camera path/transform
   HxrRuntime.*    Owns the render thread; the seam both consumers share
   main.cpp        Standalone harness (offscreen / --xr / --probe)
 plugin/         # LOP_HoudiniXR — the Houdini side
@@ -56,45 +75,77 @@ Three CMake targets: `hxr_core` (OBJECT library), `hxr` (exe), and
 `LOP_HoudiniXR` (the DSO). `hxr_core` deliberately knows nothing about the HDK
 — its only job is "render a `UsdStageRefPtr` to a headset", however that stage
 arrives. That separation is why the plugin reuses the standalone-validated
-render path unchanged.
+render path unchanged, and it's worth preserving: anything Houdini-specific
+belongs in `plugin/`, reached from `hxr_core` by callback if need be.
 
 ---
 
 ## Architecture
 
-**Cook cadence is decoupled from present cadence.** This is the central design
-point and everything else follows from it.
+### Cook cadence is decoupled from present cadence
+
+This is the central design point and everything else follows from it.
 
 - `LOP_XrOutput::cookMyLop` runs on Houdini's main/cook thread, occasionally
   (on parameter or upstream changes, and every frame while Live is on).
-- `HxrRuntime` owns a separate thread running the OpenXR session and Storm at
+- `HxrRuntime` owns a separate thread running the OpenXR session and Hydra at
   headset refresh (72–120Hz), continuously, regardless of cook activity.
 - The two communicate only through mutex/atomic-guarded setters
   (`SetStage`, `SetRendererPlugin`, `SetTimeCode`, `SetAnchor`,
-  `RequestResyncCamera`). Every one of them returns immediately — none opens a
-  session, creates a GL context, or blocks on headset I/O, because stalling
-  Houdini's cook thread is not acceptable. The render thread copies pending
-  values out under the lock and applies them *after* releasing it, since
-  applying a new stage or delegate rebuilds the whole Hydra engine.
+  `SetInteractive`, `SetMoveSpeed`, `RequestResyncCamera`, …). Every one of
+  them returns immediately — none opens a session, creates a GL context, or
+  blocks on headset I/O, because stalling Houdini's cook thread is not
+  acceptable. The render thread copies pending values out under the lock and
+  applies them *after* releasing it, since applying a new stage or delegate
+  rebuilds the whole Hydra engine.
 
-**Render delegate is selectable** (Storm default; Karma CPU/XPU etc.
-enumerated from `HdRendererPluginRegistry`, filtered for the LOP menu through
+The render thread creates and owns its **own** GL context. It never shares or
+touches Houdini's viewport contexts.
+
+The node is a passthrough (`cookModifyInput`, then edits only when placing a
+camera), so it can sit anywhere in a LOP chain. It must be on the active cook
+path (display flag, or something downstream depending on it) or it will not
+cook and nothing updates.
+
+**On upstream change** the stage is reflattened and the engine rebuilt so the
+delegate picks up new content automatically. The camera anchor is deliberately
+*not* re-latched by this — only `Resync Camera` or a session restart does that.
+
+**Time sync:** `flags().setTimeDep(live)` forces a recook every playbar frame,
+and `context.getFloatFrame()` feeds `UsdImagingGLRenderParams::frame`. HUSD
+authors USD time samples using the Houdini frame number, not seconds.
+
+### Delegate selection
+
+Storm by default; Karma CPU/XPU and anything else registered are enumerated
+from `HdRendererPluginRegistry`. The LOP menu filters them through
 `HUSD_RendererInfo` so it matches Houdini's own viewport menu — that's what
 hides the env-gated Hydra debugger and Houdini's native VK viewport delegate
-via `isNativeRenderer()`).
+(`isNativeRenderer()`).
 
-**Progressive delegates get a held pose, not the live one.** A progressive
-delegate restarts accumulation on every camera change, so rendering at the
-live head pose each frame means it never gets past its first sample. Instead
-`HxrRuntime` *holds* a pose: it keeps rendering at the held pose while
-submitting that pose (not the live one) with the image, so the OpenXR
-compositor reprojects the improving frame to wherever the head actually is.
-The held frame looks like a picture fixed in space, not stuck to the face.
-`Convergence Time` = hold until converged or the time is up, then re-capture;
-`Freeze Pose` = hold indefinitely, render to convergence, then stop rendering
-and keep presenting; `Refreeze Pose` re-captures. Storm reports converged
-after one pass, so under either setting it re-captures every frame and is
-indistinguishable from a live viewport.
+The menu is built from `HdRendererPluginRegistry::GetPluginDescs()`, **not**
+`UsdImagingGLEngine::GetRendererPlugins()`: the latter probes the current GL
+context through each plugin's `IsSupported()`, and there is none current when
+a parameter menu opens. Menu entries must use `PRM_Name::setTokenAndLabel()`
+(deep copy) — the `PRM_Name(const char*)` constructor only references its
+strings, and these come from temporaries.
+
+### Progressive delegates get a held pose, not the live one
+
+A progressive delegate restarts accumulation on every camera change, so
+rendering at the live head pose each frame means it never gets past its first
+sample. Instead `HxrRuntime` *holds* a pose: it keeps rendering at the held
+pose while submitting that pose (not the live one) with the image, so the
+OpenXR compositor reprojects the improving frame to wherever the head actually
+is. The held frame looks like a picture fixed in space, not stuck to the face.
+
+- `Convergence Time` — hold until converged or the time is up, then re-capture.
+- `Freeze Pose` — hold indefinitely, render to convergence, then stop rendering
+  and keep presenting.
+- `Refreeze Pose` — re-capture now.
+
+Storm reports converged after one pass, so under either setting it re-captures
+every frame and is indistinguishable from a live viewport.
 
 **A progressive delegate also needs one engine per eye**, since two eyes
 alternating through one engine would reset it every frame regardless of the
@@ -103,12 +154,94 @@ on a single shared engine reports `IsConverged()`; false means progressive,
 and per-view engines are built sharing one `Hgi` via `HdDriver`. Storm stays
 on one engine and pays nothing.
 
-The render thread creates and owns its **own** GL context. It never shares or
-touches Houdini's viewport contexts.
+Anything that changes what a held pose would render — new stage, new delegate,
+time code, anchor, render size — un-converges the held frames, so a frozen view
+never keeps showing a stale image, or (after an engine rebuild) a texture that
+no longer exists. That invalidation lives in `HxrRuntime`'s loop; keep it in
+sync if you add another input that affects the render.
 
-The node is a passthrough: `cookModifyInput` then no edits, so it can sit
-anywhere in a LOP chain. It must be on the active cook path (display flag, or
-something downstream depending on it) or it will not cook and nothing updates.
+### Anchoring and locomotion
+
+The stage is anchored to the **head pose at latch time**, never to the
+reference-space origin. (An earlier version anchored to the origin, which in
+`STAGE` space is on the floor at the play-area centre facing the room's
+calibrated forward — so the render camera ended up ~1.6m below the user's eyes
+with a yaw offset equal to however they were turned.)
+
+If the stage's active RenderSettings prim (via `renderSettingsPrimPath`
+metadata, not "the first one found") targets a camera: camera position → head
+position, camera heading → head heading. Otherwise the stage origin sits
+`Anchor Distance` ahead of the head and `Anchor Height` above the floor, along
+the head's heading. **Heading only, never pitch or roll** — aligning to those
+would tilt the stage so its floor no longer matches the real one. Same
+convention as the headset's own "reset view".
+
+The anchor is **latched once per session** (or on `Resync Camera`), not
+tracked continuously: following an animated camera every frame would drag the
+user's reference frame around and defeat free look-around. The latch happens
+inside the render callback because that's where the head pose is; eye 0's pose
+is used (~3cm off centre, negligible).
+
+The same transform folds in the stage's `metersPerUnit` and `upAxis`
+(`StageToRoomUnits`), since XR poses are always metres and Y-up. Without that
+a centimetre or Z-up stage renders 100× too large or on its side.
+
+**Locomotion** is an accumulated room-space displacement folded into the
+placement as a final `Translation(-locomotion)` — moving the user forward is
+shifting the stage backward. Direction follows the *live* head heading from
+the previous frame's callback. Reset by Resync (which means "back to the
+camera").
+
+### Camera placement crosses the thread boundary the other way
+
+The render thread computes the head's stage-space pose (`liveHeadToWorld *
+worldFromStage⁻¹`, full orientation this time — pitch included, it's a camera)
+and hands it to a callback. `hxr_core` stays HDK-free: the *plugin* installs
+that callback, which posts to Houdini's main loop via
+`UT_HoudiniExecutionContext::instance()->post()` (the C++ counterpart of
+`hou.ui.postEventCallback`), looking the node up by `getUniqueId()` at dispatch
+time rather than capturing a pointer an event could outlive.
+
+On the main thread `applyPlacement` sets keyframes (`setFloat(...,
+PRM_AK_FORCE_KEY)` at `CHgetEvalTime()`) on the `pt`/`pr` parms and
+`forceRecook()`s. `cookMyLop` then authors the camera from those parms under
+`HUSD_AutoWriteLock` + `HUSD_AutoLayerLock` (the `LOP_Sphere` pattern), via
+`MakeMatrixXform()` with a time sample at the current frame, converting the
+stage-space parm pose to the camera's parent-local space.
+
+Placements live in **keyframes, not hidden node state**, because
+`cookModifyInput` rebuilds the layer every cook — and so they also persist in
+the .hip, show in the channel editor, and are editable there. The rotate parms
+are XYZ Euler in Gf row-vector composition (`Rx*Ry*Rz`); `EulerFromMatrix` /
+`RotationFromEuler` are the single source of truth for that, and
+`applyPlacement` round-trips and warns if they ever disagree. The write lock
+must be released before the live block's read lock. Since the input's
+`modVersion` can't see the node's own edits, a placement sets `myOutputDirty`
+to force one reflatten, and Resync-while-applied does too (that's when the
+snapshot's camera is actually read).
+
+### Interactive Placement is resolved on the render thread
+
+Effective state = the node toggle **OR** either controller trigger held past
+half travel (`XrViewportSession::TriggerValue()`). The node only ever sends
+*configured* values; `HxrRuntime` substitutes Storm / 0s / not-frozen while
+effective-interactive is true. A trigger routed back through a Houdini cook
+would lag, which is why this isn't node-level. `updateParmsFlags` greys the
+overridden parms for the toggle only.
+
+The freeze capture happens on the *effective* frozen false→true transition, so
+releasing the trigger with Freeze Pose set freezes right there. The Apprentice
+cap is passed separately (`SetRendererMaxSize`) because it binds to the
+configured delegate, not to the Storm substitute.
+
+`Max Render Resolution` (0×0 = uncapped) shrinks the per-eye render buffer,
+preserving aspect, and the presenter's blit upscales to the swapchain. It is
+both the licence-limit control and the performance knob that makes a
+progressive delegate usable. Under Apprentice with a Karma delegate it is
+additionally clamped to 1280×720 automatically — detected by process executable
+name (`happrentice.exe`, the C++ equivalent of `hou.applicationName() ==
+"happrentice"`), since no HDK API exposes the product licence tier or its
+render limit.
 
 ---
 
@@ -149,24 +282,24 @@ Non-obvious constraints, each of which cost real debugging time:
 - **`WIN32_LEAN_AND_MEAN` strips `IUnknown`**, which `openxr_platform.h` needs
   unconditionally in its Win32 block (not just for D3D). `XrPlatform.h`
   includes `<unknwn.h>` to fix this; keep that include order.
-- **`glBlitFramebuffer` honours the scissor test.** Hydra's render pass sets
-  a scissor rect matching its render size and can leave it enabled. At full
-  size that's invisible; when rendering below swapchain resolution it clipped
-  the upscaled blit back down to a small rectangle in the corner. The
-  presenter disables scissor around the blit, and uses the AOV texture's
-  actual dimensions (`HgiTexture::GetDescriptor().dimensions`) as the blit
-  source rather than the size that was requested.
+- **`glBlitFramebuffer` honours the scissor test.** Hydra's render pass sets a
+  scissor rect matching its render size and can leave it enabled. At full size
+  that's invisible; when rendering below swapchain resolution it clipped the
+  upscaled blit back down to a small rectangle in the corner. The presenter
+  disables scissor around the blit, and uses the AOV texture's actual
+  dimensions (`HgiTexture::GetDescriptor().dimensions`) as the blit source
+  rather than the size that was requested.
 - **Windows 11's System32 `onnxruntime.dll` shadows Houdini's.** System32 is
   searched before `PATH`, so any Houdini-native delegate that pulls in ONNX
   (Karma does) loads the wrong one and aborts. `hxr.exe` calls
   `SetDllDirectory($HFS/bin)` at startup to slot Houdini's copy ahead of
   System32; `houdini.exe` never needs this since `$HFS/bin` is its own
   directory. `run.ps1` also imports Houdini's environment from `hconfig`.
-- **Karma cannot run in the standalone exe.** It resolves `opdef:` shader
-  paths through Houdini's operator framework (OP director + HDA library),
-  which only exists in a real Houdini process — it segfaults without it.
-  This is not an env-var problem. Karma is plugin-only; the standalone tool
-  validates the generic delegate mechanism with Storm.
+- **Karma cannot run in the standalone exe.** It resolves `opdef:` shader paths
+  through Houdini's operator framework (OP director + HDA library), which only
+  exists in a real Houdini process — it segfaults without it. This is not an
+  env-var problem. Karma is plugin-only; the standalone tool validates the
+  generic delegate mechanism with Storm.
 
 ---
 
@@ -199,9 +332,9 @@ The flattened stage qualifies. Raw HUSD data does not.
 
 **4. The OpenXR loader allows exactly one `XrInstance` per process.**
 `XrViewportSession` tears down on both destruction and a failed `Init()`
-(headset not ready, runtime mid-restart), because a leaked instance makes
-every later attempt fail with `XR_ERROR_LIMIT_REACHED` until Houdini
-restarts. The corollary: only one `XR Output` node can be Live at a time.
+(headset not ready, runtime mid-restart), because a leaked instance makes every
+later attempt fail with `XR_ERROR_LIMIT_REACHED` until Houdini restarts. The
+corollary: only one `XR Output` node can be Live at a time.
 
 **5. A new stage or delegate needs a new `UsdImagingGLEngine`, not a new
 pointer handed to the old one.** The engine populates Hydra exactly once per
@@ -211,12 +344,19 @@ different stage is silently ignored — upstream edits never reach the delegate.
 reason. Pointer identity *is* sound at that level, unlike for raw HUSD stages:
 every stage reaching `HydraRenderer` is a fresh immutable flattened copy.
 
+**6. Never submit a pose that was never captured.** `xrEndFrame` rejects a zero
+quaternion with `XR_ERROR_POSE_INVALID` and the loop dies. `RenderFrame` may
+skip the render callback entirely on a given frame (runtime says don't render,
+or views aren't valid yet — both routine at session start), so "held" is
+tracked per eye and set only inside the callback, and an eye that has never
+captured is forced to capture regardless of the frame-level decision.
+
 ---
 
 ## Houdini plugin workflow
 
 1. Close Houdini. Once it has loaded `LOP_HoudiniXR.dll`, Windows locks the
-   file and the build will fail.
+   file and the build will fail at link.
 2. `./scripts/build.cmd` — this deploys straight into Houdini's `dso` folder.
 3. Start Houdini. Native DSOs do not hot-reload; a new *or changed* node type
    needs a restart.
@@ -231,117 +371,26 @@ Node parameters: `Live`, `Interactive Placement`, `Renderer`,
 **Controller input** (`XrViewportSession`, one action set): trigger (float,
 both hands), right thumbstick (Vector2f), right thumbstick click (boolean,
 edge via `changedSinceLastSync`). Synced at the top of every `RenderFrame`;
-all read as zero when the session isn't focused.
-
-**Locomotion** is an accumulated room-space displacement folded into the
-placement as a final `Translation(-locomotion)` — moving the user forward is
-shifting the stage backward. Direction follows the *live* head heading from
-the previous frame's callback. Reset by Resync (which means "back to the
-camera").
-
-**Camera placement crosses the thread boundary the other way.** The render
-thread computes the head's stage-space pose (`liveHeadToWorld *
-worldFromStage⁻¹`, full orientation this time — pitch included, it's a
-camera) and hands it to a callback. `hxr_core` stays HDK-free: the *plugin*
-installs the callback, which posts to Houdini's main loop via
-`UT_HoudiniExecutionContext::instance()->post()` (the C++ counterpart of
-`hou.ui.postEventCallback`), looking the node up by `getUniqueId()` at
-dispatch time rather than capturing a pointer an event could outlive. On the
-main thread `applyPlacement` sets keyframes (`setFloat(..., PRM_AK_FORCE_KEY)`
-at `CHgetEvalTime()`) on the `pt`/`pr` parms and `forceRecook()`s; `cookMyLop`
-authors the camera from those parms under `HUSD_AutoWriteLock` +
-`HUSD_AutoLayerLock` (the `LOP_Sphere` pattern), via `MakeMatrixXform()` with
-a time sample at the current frame, converting the stage-space parm pose to
-the camera's parent-local space. Placements live in keyframes, not hidden
-node state, because `cookModifyInput` rebuilds the layer every cook — and so
-they persist, show in the channel editor, and are editable. The rotate parms
-are XYZ Euler in Gf row-vector composition (`Rx*Ry*Rz`); `EulerFromMatrix` /
-`RotationFromEuler` are the single source of truth for that, and
-`applyPlacement` round-trips and warns if they ever disagree. The write lock
-must be released before the live block's read lock. Since the input's
-`modVersion` can't see the node's own edits, a placement sets `myOutputDirty`
-to force one reflatten, and Resync-while-applied does too (that's when the
-snapshot's camera is actually read).
-
-**Interactive Placement is resolved on the render thread**, not in the node:
-effective = the toggle OR either controller trigger held past half travel
-(`XrViewportSession::TriggerValue()`, one float action bound to both hands
-on the Oculus Touch and Khronos simple profiles; OpenXR resolves two sources
-to whichever is pulled further). The node only ever sends *configured*
-values (`SetRendererPlugin`, `SetConvergeSeconds`, `SetFrozen`,
-`SetInteractive`); `HxrRuntime` substitutes Storm / 0s / not-frozen while
-effective-interactive is true, and greys the overridden parms via
-`updateParmsFlags` for the toggle only. A trigger routed back through a
-Houdini cook would lag, which is why this isn't node-level. The freeze
-capture happens on the *effective* frozen false→true transition, so releasing
-the trigger with Freeze Pose set freezes right there. The Apprentice cap is
-passed separately (`SetRendererMaxSize`) because it binds to the configured
-delegate, not to the Storm substitute.
-
-Anything that changes what a held pose would render — new stage, new
-delegate, time code, anchor, render size — un-converges the held frames, so a
-frozen view never keeps showing a stale image, or (after an engine rebuild) a
-texture that no longer exists. That invalidation lives in `HxrRuntime`'s loop;
-keep it in sync if you add another input that affects the render.
-
-`Max Render Resolution` (0×0 = uncapped) shrinks the per-eye render buffer,
-preserving aspect, and the presenter's blit upscales to the swapchain. It's
-both the licence-limit control and the performance knob that makes a
-progressive delegate usable. Under Apprentice with a Karma delegate it's
-additionally clamped to 1280×720 automatically — detected by process
-executable name (`happrentice.exe`, the C++ equivalent of
-`hou.applicationName() == "happrentice"`), since no HDK API exposes the
-product licence tier or its render limit. The `Renderer` menu is built from the Hydra plugin registry
-each time it opens — via `HdRendererPluginRegistry::GetPluginDescs()`, not
-`UsdImagingGLEngine::GetRendererPlugins()`, because the latter probes the
-current GL context through each plugin's `IsSupported()` and there is none
-current when a parameter menu opens. Menu entries must use
-`PRM_Name::setTokenAndLabel()` (deep copy): the `PRM_Name(const char*)`
-constructor only references its strings, and these come from temporaries.
-
-**On upstream change**, the stage is reflattened and the engine rebuilt so the
-delegate picks up the new content automatically. The camera anchor is
-deliberately *not* re-latched by this — only `Resync Camera` or a session
-restart does that.
-
-**Anchor behaviour:** the stage is anchored to the **head pose at latch
-time**, never to the reference-space origin. (An earlier version anchored to
-the origin, which in `STAGE` space is on the floor at the play-area centre
-facing the room's calibrated forward — so the render camera ended up ~1.6m
-below the user's eyes with a yaw offset equal to however they were turned.)
-If the stage's active RenderSettings prim (via `renderSettingsPrimPath`
-metadata, not "the first one found") targets a camera: camera position → head
-position, camera heading → head heading. Otherwise the stage origin sits
-`Anchor Distance` ahead of the head and `Anchor Height` above the floor, along
-the head's heading. **Heading only, never pitch or roll** — aligning to those
-would tilt the stage so its floor no longer matches the real one. This is the
-same convention as the headset's own "reset view". The anchor is **latched
-once per session** (or on `Resync Camera`), not tracked continuously:
-following an animated camera every frame would drag the user's reference
-frame around and defeat free look-around. The latch happens inside the render
-callback because that's where the head pose is; eye 0's pose is used (~3cm
-off centre, negligible).
-
-The same transform folds in the stage's `metersPerUnit` and `upAxis`
-(`StageToRoomUnits`), since XR poses are always metres and Y-up. Without that
-a centimetre or Z-up stage renders 100× too large or on its side.
-
-**Time sync:** `flags().setTimeDep(live)` forces a recook every playbar frame,
-and `context.getFloatFrame()` feeds `UsdImagingGLRenderParams::frame`. HUSD
-authors USD time samples using the Houdini frame number, not seconds.
+all read as zero when the session isn't focused. In the headset: trigger held
+= interactive placement, thumbstick = move, thumbstick click = place the
+camera at the head.
 
 ---
 
-## Testing
+## Verification
+
+There is no test suite. These stand in for one:
 
 - **Offscreen** (`./scripts/run.cmd`) is the fast regression check — no headset,
-  no Houdini. Run it after any change to `hxr_core`.
+  no Houdini, ~2s. Run it after any change to `hxr_core`. A healthy run prints
+  the engine built, `Converged: yes after 1 pass`, and the written file.
 - **`--probe`** answers "does the active OpenXR runtime support what we need"
-  with no headset and no session.
+  and "which delegates are registered", with no headset and no session.
 - **`--xr`** needs the Quest connected via Link/Air Link. A successful start
   prints reference space, swapchain size (2080x2096 per eye on Quest 2),
   `Session running.`, and the frame count on exit.
-- The plugin path can only be verified inside Houdini with hardware attached.
+- The plugin path, and anything involving controller input or Karma, can only
+  be verified inside Houdini with hardware attached — i.e. by the user.
 
 Oculus runtime IPC teardown spam in the console on exit is normal, not an error.
 
@@ -349,11 +398,14 @@ Oculus runtime IPC teardown spam in the console on exit is normal, not an error.
 
 ## Status
 
-Working: standalone offscreen and stereo XR rendering; the in-process LOP
-bridge; playbar time sync; RenderSettings-camera anchoring; Resync button;
-selectable render delegate with automatic engine rebuild on upstream change.
-Karma is selectable and wired through, but only verifiable inside Houdini
-(see Environment facts) and not yet tested there.
+Confirmed working on hardware: standalone offscreen and stereo XR rendering;
+the in-process LOP bridge; playbar time sync; RenderSettings-camera anchoring
+and Resync; selectable delegate with engine rebuild on upstream change; Karma
+in the plugin.
+
+Built but **not yet confirmed in-headset**: head-anchored placement (replacing
+the origin-anchored version), thumbstick locomotion, thumbstick-click camera
+placement, trigger-driven interactive placement.
 
 Open questions, deliberately instrumented rather than assumed:
 
@@ -382,3 +434,7 @@ of these differ from what a plausible guess would produce. `toolkit/samples/`
 Matrix convention: `GfMatrix4d` is **row-vector** (`p' = p * M`), so "apply A
 then B" composes as `A * B`. Build projections through `GfFrustum` rather than
 by hand so the convention stays consistent.
+
+When a fix rests on an assumption that can't be settled from the headers, add
+a print rather than asserting it — the `Flatten()` timing and the
+reflatten/reuse lines both exist for that reason, and both earned their keep.
