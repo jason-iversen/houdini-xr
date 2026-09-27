@@ -23,3 +23,7 @@ hxr_frame*.png
 # OS
 Thumbs.db
 desktop.ini
+
+# Local working files
+crag.hipnc
+hxr_pick.bmp

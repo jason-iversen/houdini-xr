@@ -259,9 +259,9 @@ Editing the scene upstream updates the headset automatically. That does *not*
 move your viewpoint — only **Resync Camera** does — so you can keep tweaking
 the scene from wherever you're standing.
 
-`cc.usda` and `crag.hipnc` in this directory are small test scenes. Note that
-`cc.usda` has no RenderSettings prim, so it exercises the Anchor
-Distance/Height fallback rather than camera anchoring.
+`cc.usda` in this directory is a small test scene. It has no RenderSettings
+prim, so it exercises the Anchor Distance/Height fallback rather than camera
+anchoring.
 
 ## How it works
 
