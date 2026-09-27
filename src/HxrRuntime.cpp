@@ -317,6 +317,7 @@ void HxrRuntime::ThreadMain()
     std::string activeRenderer;
     bool        lastFrozen = false;
     bool        lastMono   = false;
+    bool        lastStereo = _stereo.load();
     // Where the single-eye billboard stands: at the depth of whatever was
     // under the reticle when it was captured, so the thing being looked at
     // stays at its true distance and only the rest is flattened onto it.
@@ -520,6 +521,22 @@ void HxrRuntime::ThreadMain()
             // re-latches via the Resync button (or a session restart).
             renderer.SetStage(newStage);
             roomFromStageUnits = StageToRoomUnits(newStage);
+        }
+
+        // Switching Stereo while Renderer is displaying restarts the render
+        // from scratch -- fresh engines, so nothing accumulated or paused in
+        // one mode carries into the other. Tied to the setting, not to the
+        // effective mono state: that also flips whenever a grip is held, and
+        // rebuilding there would re-sync the scene on every grip. A new
+        // delegate or stage this frame has rebuilt the engines already.
+        const bool stereoSetting = _stereo.load();
+        const bool restartRender =
+            stereoSetting != lastStereo && !interactive && !rendererSwitched && !applyStage;
+        lastStereo = stereoSetting;
+        if (restartRender) {
+            renderer.Restart();
+            std::printf("HxrRuntime: Stereo %s -- render restarted\n",
+                        stereoSetting ? "on" : "off");
         }
 
         if (_resyncRequested.exchange(false)) {
@@ -827,6 +844,7 @@ void HxrRuntime::ThreadMain()
         }
 
         const bool contentChanged = applyStage || rendererSwitched || monoSwitched ||
+                                    restartRender ||
                                     timeCode != lastTimeCode ||
                                     worldFromStage != lastWorldFromStage ||
                                     renderSize != lastRenderSize;

@@ -205,8 +205,13 @@ submitted. So mono only engages once views have been located
 (the image converges, the reticle moves), with mips like the desktop panel;
 both share `XrPresenterGL`'s quad swapchains (`Quad::Panel`,
 `Quad::Billboard`). Switching mono ↔ stereo forces a
-re-capture (the held pose means something different in each) and pauses the
-other eyes' own engines (`HydraRenderer::PauseView`) — a progressive delegate
+re-capture (the held pose means something different in each). Changing the
+**Stereo setting** while Renderer is displaying goes further and rebuilds
+the engines (`HydraRenderer::Restart`) — a render from scratch, nothing
+accumulated or paused carried across modes. That's keyed to the setting, not
+the effective mono state, which also flips whenever a grip is held;
+rebuilding there would re-sync the scene on every grip. Any other mono
+switch pauses the other eyes' own engines (`HydraRenderer::PauseView`) — a progressive delegate
 keeps accumulating in the background after its last render, so an idle
 second-eye Karma would otherwise hold the GPU until it converged. The next
 `RenderEye` for that view resumes it.

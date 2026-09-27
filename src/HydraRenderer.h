@@ -51,6 +51,10 @@ public:
     bool SetStage(UsdStageRefPtr const& stage);
     bool SetRendererPlugin(TfToken const& id);
 
+    // Rebuilds the engines for the same stage and delegate: a render from
+    // scratch, with no accumulation or paused per-view engine carried over.
+    bool Restart();
+
     // Live-resizes the render buffers without rebuilding. Rendering below the
     // swapchain's resolution and letting the presenter upscale is how a
     // progressive delegate becomes usable at all, and how a licence's

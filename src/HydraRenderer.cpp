@@ -132,6 +132,11 @@ void HydraRenderer::SetRenderSize(GfVec2i const& size)
     }
 }
 
+bool HydraRenderer::Restart()
+{
+    return _stage ? _CreateEngines(1) : true;
+}
+
 bool HydraRenderer::SetStage(UsdStageRefPtr const& stage)
 {
     // Pointer identity is sound here, unlike for raw HUSD stages: every stage

@@ -71,6 +71,8 @@ you stood, so from there it lines up with the scene, and the thing you were
 looking at stays at its real distance. Everything else is flat on that
 picture, and it stays put like a photo as you move. Turn Stereo on for a
 true 3D render at twice the cost. The live placement view is always stereo.
+Switching Stereo either way (the checkbox, or Y in the headset) restarts the
+render from scratch.
 
 Running Houdini Apprentice? Karma there is limited to 1280×720, and the node
 applies that cap automatically when a Karma delegate is selected (you'll see
