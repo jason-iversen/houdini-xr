@@ -420,6 +420,7 @@ void HxrRuntime::ThreadMain()
     bool       anchorFromCamera = false;
     HeadFrame  anchorHead;
     GfMatrix4d stageFromCamera(1.0);       // raw, in stage units
+    SdfPath    snapPath;                   // the camera/light last snapped to, if any
     GfMatrix4d roomFromStageUnits(1.0);    // metres + Y-up; refreshed with the stage
 
     // Row-vector composition: each factor applies after the one before it.
@@ -542,10 +543,46 @@ void HxrRuntime::ThreadMain()
         if (_resyncRequested.exchange(false)) {
             anchorLatched    = false;
             anchorFromCamera = false;
+            snapPath         = SdfPath();   // the next left-stick click starts over
             // Resync means "back to the camera": drop movement and orbit too.
             userXform   = GfMatrix4d(1.0);
             orbitLive   = GfMatrix4d(1.0);
             gripWasHeld = false;
+        }
+
+        // --- Left stick click: snap to the next camera or light ---
+        // Re-anchors exactly as the RenderSettings camera does -- the prim's
+        // position at the head, its heading as the head's, floor kept level
+        // -- and, like Resync, drops movement and orbit so the view is the
+        // prim's. The list is rebuilt from the current snapshot on every
+        // click, so upstream edits are picked up; the next entry is the one
+        // after the last snapped-to path, or the first if that's gone.
+        if (xr.LeftThumbstickPressed() && haveLiveHead && renderer.Stage()) {
+            const std::vector<StageView> views = FindStageViews(renderer.Stage());
+            size_t next = 0;
+            for (size_t i = 0; i < views.size(); ++i) {
+                if (views[i].path == snapPath) {
+                    next = (i + 1) % views.size();
+                    break;
+                }
+            }
+            GfMatrix4d stageFromView;
+            if (views.empty()) {
+                std::printf("HxrRuntime: no cameras or lights on the stage to snap to\n");
+            } else if (FindPrimTransform(renderer.Stage(), views[next].path,
+                                         UsdTimeCode(_timeCode.load()), &stageFromView)) {
+                snapPath         = views[next].path;
+                stageFromCamera  = stageFromView;
+                anchorHead       = liveHead;
+                anchorFromCamera = true;
+                anchorLatched    = true;
+                userXform        = GfMatrix4d(1.0);
+                orbitLive        = GfMatrix4d(1.0);
+                gripWasHeld      = false;
+                std::printf("HxrRuntime: snapped to %s %s (%zu of %zu)\n",
+                            views[next].isLight ? "light" : "camera",
+                            snapPath.GetText(), next + 1, views.size());
+            }
         }
 
         if (!xr.IsRunning()) {

@@ -139,8 +139,9 @@ public:
     // True only on the frame the left menu button is pressed.
     bool LeftMenuPressed() const { return _leftMenuPressed; }
 
-    // True only on the frame the right thumbstick is clicked down.
+    // True only on the frame the right / left thumbstick is clicked down.
     bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
+    bool LeftThumbstickPressed() const { return _leftThumbstickPressed; }
 
     // Grip (squeeze), 0..1: the right grip orbits, the left scrubs the
     // playbar. One action with both hands as subaction paths.
@@ -190,6 +191,7 @@ private:
     XrAction    _menuAction       = XR_NULL_HANDLE;
     XrAction    _buttonXAction    = XR_NULL_HANDLE;
     XrAction    _buttonYAction    = XR_NULL_HANDLE;
+    XrAction    _leftClickAction  = XR_NULL_HANDLE;
     XrAction    _buttonAAction    = XR_NULL_HANDLE;
     XrAction    _buttonBAction    = XR_NULL_HANDLE;
     XrAction    _gripAction       = XR_NULL_HANDLE;
@@ -207,6 +209,7 @@ private:
     bool        _leftMenuPressed = false;
     bool        _buttonXPressed  = false;
     bool        _buttonYPressed  = false;
+    bool        _leftThumbstickPressed = false;
     bool        _leftTriggerPressed = false;
     bool        _leftTriggerDown    = false;   // hysteresis state; persists across syncs
     bool        _buttonA = false;

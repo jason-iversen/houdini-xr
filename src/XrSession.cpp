@@ -224,6 +224,15 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    XrActionCreateInfo leftClickInfo{XR_TYPE_ACTION_CREATE_INFO};
+    leftClickInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(leftClickInfo.actionName, "cycle_views", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(leftClickInfo.localizedActionName, "Cycle Cameras and Lights",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &leftClickInfo, &_leftClickAction), "xrCreateAction")) {
+        return false;
+    }
+
     XrActionCreateInfo yInfo{XR_TYPE_ACTION_CREATE_INFO};
     yInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
     std::strncpy(yInfo.actionName, "toggle_stereo", XR_MAX_ACTION_NAME_SIZE - 1);
@@ -272,6 +281,7 @@ bool XrViewportSession::_InitInput()
             {_gripAction,       path("/user/hand/left/input/squeeze/value")},
             {_buttonXAction,    path("/user/hand/left/input/x/click")},
             {_buttonYAction,    path("/user/hand/left/input/y/click")},
+            {_leftClickAction,  path("/user/hand/left/input/thumbstick/click")},
             {_aimPoseAction,    path("/user/hand/right/input/aim/pose")},
             {_aimPoseAction,    path("/user/hand/left/input/aim/pose")},
         };
@@ -351,6 +361,7 @@ void XrViewportSession::_SyncInput()
     _leftGripValue          = 0.0f;
     _buttonXPressed         = false;
     _buttonYPressed         = false;
+    _leftThumbstickPressed  = false;
     _leftTriggerPressed     = false;
     _gripValue              = 0.0f;
     _rightThumbstick        = {0.0f, 0.0f};
@@ -436,6 +447,13 @@ void XrViewportSession::_SyncInput()
     if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonX)) && buttonX.isActive) {
         _buttonXPressed = buttonX.changedSinceLastSync && buttonX.currentState;
     }
+    getInfo.action = _leftClickAction;
+    XrActionStateBoolean leftClick{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &leftClick)) &&
+        leftClick.isActive) {
+        _leftThumbstickPressed = leftClick.changedSinceLastSync && leftClick.currentState;
+    }
+
     getInfo.action = _buttonYAction;
     XrActionStateBoolean buttonY{XR_TYPE_ACTION_STATE_BOOLEAN};
     if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonY)) && buttonY.isActive) {
@@ -653,6 +671,7 @@ void XrViewportSession::Shutdown()
         _menuAction       = XR_NULL_HANDLE;
         _buttonXAction    = XR_NULL_HANDLE;
         _buttonYAction    = XR_NULL_HANDLE;
+        _leftClickAction  = XR_NULL_HANDLE;
         _buttonAAction    = XR_NULL_HANDLE;
         _buttonBAction    = XR_NULL_HANDLE;
         _gripAction       = XR_NULL_HANDLE;

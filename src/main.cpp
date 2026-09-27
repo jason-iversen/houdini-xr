@@ -9,6 +9,7 @@
 #include "GLContext.h"
 #include "HxrRuntime.h"
 #include "HydraRenderer.h"
+#include "RenderCamera.h"
 #include "Reticle.h"
 #include "XrPlatform.h"
 
@@ -48,6 +49,7 @@ struct Options
     bool  xr     = false;
     bool  probe  = false;
     bool  desktop = false;
+    bool  views   = false;   // list what the left-stick click cycles through
     int   frames = 0;   // 0 = run until the runtime asks us to stop
 
     // Where the stage's own origin sits relative to the XR reference space.
@@ -125,6 +127,8 @@ Options ParseArgs(int argc, char** argv)
             opts.xr = true;
         } else if (arg == "--probe") {
             opts.probe = true;
+        } else if (arg == "--views") {
+            opts.views = true;
         } else if (arg == "--desktop") {
             opts.desktop = true;
         } else if (arg == "--dist" && hasNext) {
@@ -146,7 +150,7 @@ Options ParseArgs(int argc, char** argv)
         } else if (arg == "--reticle") {
             opts.reticle = true;
         } else {
-            std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--desktop] [--frames N]"
+            std::printf("usage: hxr [--stage file.usd] [--xr] [--probe] [--desktop] [--views] [--frames N]"
                         " [--renderer PluginId] [--max-res WxH] [--converge S] [--frozen] [--mono]"
                         " [--pick] [--reticle]"
                         " [--dist M] [--height M] [--out image.bmp] [--size WxH]\n");
@@ -495,6 +499,23 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "Could not open stage: %s\n", opts.stagePath.c_str());
             return 1;
         }
+    }
+
+    // The headset's left-stick click order, with each view's position and
+    // facing -- the same lookup the runtime does, no GL or headset needed.
+    if (opts.views) {
+        const std::vector<StageView> views = FindStageViews(stage);
+        std::printf("%zu camera/light views:\n", views.size());
+        for (StageView const& view : views) {
+            GfMatrix4d m;
+            FindPrimTransform(stage, view.path, UsdTimeCode::Default(), &m);
+            const GfVec3d p = m.ExtractTranslation();
+            const GfVec3d f = m.TransformDir(GfVec3d(0.0, 0.0, -1.0)).GetNormalized();
+            std::printf("  %-6s %-24s at (%.2f, %.2f, %.2f) facing (%.2f, %.2f, %.2f)\n",
+                        view.isLight ? "light" : "camera", view.path.GetText(),
+                        p[0], p[1], p[2], f[0], f[1], f[2]);
+        }
+        return 0;
     }
 
     // HxrRuntime creates and owns its GL context internally on its own

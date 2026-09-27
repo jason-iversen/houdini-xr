@@ -131,7 +131,8 @@ Options: `--renderer PluginId`, `--max-res WxH`, `--converge S`, `--frozen`, `--
 `--pick`, `--reticle`, `--desktop`, `--size WxH`, `--out image.bmp`,
 `--dist M`, `--height M`. `--reticle` draws the headset's reticle into the
 image; `--desktop` writes out your monitor exactly as the headset's desktop
-panel would show it.
+panel would show it; `--views` lists the cameras and lights the left-stick
+click cycles through.
 
 With no `--stage`, it renders a built-in sphere — enough to confirm the whole
 path works end to end.
@@ -184,6 +185,7 @@ your setup.
 | Right thumbstick left/right | **Strafe** across the line of sight |
 | B / A (held) | Move **up / down**, relative to where you're looking |
 | Left thumbstick flick left/right | **Snap turn** by the Snap Turn Angle |
+| Left thumbstick click | **Jump to the next camera or light** on the stage — cameras first, then lights |
 | Right thumbstick click | **Place the camera** where your head is, at the current frame |
 | Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle — left/right turns amplified by Orbit Twist Gain |
 | Left grip (held) + twist the controller | **Scrub the playbar** — clockwise forward, like a jog wheel |
@@ -256,6 +258,15 @@ or down. Either way the placement is set once when the session starts, so
 you're free to walk around afterwards rather than being dragged along by an
 animated camera. Press **Resync Camera** to re-snap from wherever you're
 standing now.
+
+**Jumping between cameras and lights.** Click the left thumbstick to put
+yourself at the next camera on the stage, facing where it faces; keep
+clicking to go through every camera, then every light (to see what a light
+sees), and round again. Like the starting camera, only its heading is used,
+so the floor stays level — look down to see what a downward-pointing light
+is aimed at. Each jump clears any movement or orbit, and **Resync Camera**
+takes you back to the RenderSettings camera and starts the cycle over. Dome
+lights are skipped, since they have no position to stand at.
 
 Editing the scene upstream updates the headset automatically. That does *not*
 move your viewpoint — only **Resync Camera** does — so you can keep tweaking

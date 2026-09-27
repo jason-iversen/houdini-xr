@@ -44,7 +44,7 @@ After a Houdini update, rebuild the plugin before launching — the deployed DLL
 is linked against the previous install's libraries.
 
 `run.cmd` flags: `--stage file.usd`, `--renderer PluginId`, `--max-res WxH`,
-`--converge S`, `--frozen`, `--mono`, `--pick`, `--reticle`, `--desktop`, `--frames N`,
+`--converge S`, `--frozen`, `--mono`, `--pick`, `--reticle`, `--desktop`, `--views`, `--frames N`,
 `--size WxH`, `--dist M`, `--height M`, `--out image.bmp`.
 
 The offscreen camera is fixed at (0, 1.5, 6) looking at the origin — it does
@@ -267,6 +267,17 @@ flick fires past 0.7 deflection and re-arms below 0.3. Snap is ignored while
 the grip is held — the orbit pivot is latched in room space, and turning the
 stage under it would move it off its surface point.
 Resync clears `userXform` (Resync means "back to the camera").
+
+**Left-stick click snaps to the next camera or light.** `FindStageViews`
+(RenderCamera.cpp) lists every `UsdGeomCamera`, then every prim with
+`UsdLuxLightAPI` except dome lights, in traversal order, from the render
+thread's own flattened snapshot — rebuilt on each click so upstream edits
+count. The snap re-anchors exactly like the RenderSettings latch (`anchorHead`
+= the live head, `anchorFromCamera` with the prim's local-to-world as
+`stageFromCamera`; both cameras and lights look down local -Z) but sets it
+directly in the loop rather than via the callback's `!anchorLatched` path,
+and clears `userXform`/orbit. The cycle position is the last snapped path
+(`snapPath`), so a vanished prim restarts at the first; Resync clears it.
 
 ### Reticle and grip orbit
 
@@ -630,7 +641,7 @@ the top of every `RenderFrame`; the aim poses are located after
 `xrWaitFrame`. All read as zero / invalid when the session isn't focused. In
 the headset: X = flip Interactive Placement, Y = flip Stereo, left trigger
 = play/stop the playbar, right stick = dolly/strafe
-along/across the view, B/A = up/down, left stick flick = snap turn, right
+along/across the view, B/A = up/down, left stick flick = snap turn, left stick click = next camera/light, right
 stick click = place the camera at the head, right grip held + turn = orbit
 about the reticle, left grip held + twist = scrub the playbar, left menu
 button = show/hide the desktop panel.
@@ -660,6 +671,11 @@ There is no test suite. These stand in for one:
   like the panel swapchain, and writes it out. A correct image is upright,
   with correct colours, the size `PanelSize` gives (a 3840×2400 monitor comes
   out 1920×1200), and a cross on the mouse pointer.
+- **`--views`** prints the cameras and lights the left-stick click cycles
+  through, in order, with each one's position and facing — `FindStageViews`
+  and `FindPrimTransform`, no GL needed. Checked against a stage with two
+  cameras, a sphere, distant and dome light: cameras first, dome skipped,
+  facings as authored.
 - **`--xr`** needs the Quest connected via Link/Air Link. A successful start
   prints reference space, swapchain size (2080x2096 per eye on Quest 2),
   `Session running.`, and the frame count on exit.
