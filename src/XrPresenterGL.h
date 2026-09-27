@@ -25,19 +25,34 @@ public:
     bool PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth, int srcHeight,
                     bool reticleVisible, float reticleNdcX, float reticleNdcY);
 
-    // The desktop panel's swapchain: separate from the eyes', sized to the
-    // panel image, and created on first use. `created` reports a new
-    // swapchain, whose images hold nothing until drawn into.
-    bool EnsurePanelSwapchain(uint32_t width, uint32_t height, bool* created);
-    XrSwapchain PanelSwapchain() const { return _panel.swapchain; }
-    uint32_t PanelWidth() const { return _panelWidth; }
-    uint32_t PanelHeight() const { return _panelHeight; }
+    // Flat quad layers, each with a swapchain of its own: the desktop panel,
+    // and the billboard single-eye rendering is shown on.
+    enum class Quad
+    {
+        Panel,
+        Billboard,
+        Count
+    };
 
-    // Acquire a panel image, bind it as the draw framebuffer, let `draw` fill
-    // it (given its size), rebuild the mip chain, release. Mips matter here:
-    // the compositor shrinks the panel well below its pixel size, and
-    // without them text aliases and shimmers as the head moves.
-    bool PresentPanel(std::function<void(int width, int height)> const& draw);
+    // Created on first use, recreated if the size changes. `created` reports
+    // a new swapchain, whose images hold nothing until drawn into.
+    bool EnsureQuadSwapchain(Quad quad, uint32_t width, uint32_t height, bool* created);
+    XrSwapchain QuadSwapchain(Quad quad) const { return _quads[int(quad)].chain.swapchain; }
+    uint32_t QuadWidth(Quad quad) const { return _quads[int(quad)].width; }
+    uint32_t QuadHeight(Quad quad) const { return _quads[int(quad)].height; }
+
+    // Acquire an image, bind it as the draw framebuffer, let `draw` fill it
+    // (given its size), rebuild the mip chain, release. Mips matter: the
+    // compositor often shrinks a quad well below its pixel size, and without
+    // them detail aliases and shimmers as the head moves.
+    bool PresentQuad(Quad quad, std::function<void(int width, int height)> const& draw);
+
+    // Into the bound draw framebuffer: a linear-colour texture (a Hydra AOV),
+    // stretched to fill, sRGB-encoded on write when the swapchains are sRGB,
+    // then the reticle at an NDC position. PresentEye's own blit; also what
+    // fills the billboard.
+    void BlitLinear(uint32_t srcTexture, int srcWidth, int srcHeight, int dstWidth,
+                    int dstHeight, bool reticleVisible, float reticleNdcX, float reticleNdcY);
 
 private:
     struct ViewSwapchain
@@ -45,12 +60,16 @@ private:
         XrSwapchain swapchain = XR_NULL_HANDLE;
         std::vector<XrSwapchainImageOpenGLKHR> images;
     };
+    struct QuadChain
+    {
+        ViewSwapchain chain;
+        uint32_t      width  = 0;
+        uint32_t      height = 0;
+        uint32_t      mips   = 1;
+    };
 
     std::vector<ViewSwapchain> _views;
-    ViewSwapchain _panel;
-    uint32_t _panelWidth  = 0;
-    uint32_t _panelHeight = 0;
-    uint32_t _panelMips   = 1;
+    QuadChain _quads[int(Quad::Count)];
     XrSession _session    = XR_NULL_HANDLE;
     int64_t   _format     = 0;
     uint32_t _width   = 0;

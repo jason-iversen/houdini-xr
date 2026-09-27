@@ -52,11 +52,38 @@ public:
     // Interactive Placement: render a live view with the interactive
     // renderer (Storm unless set otherwise) instead of what's configured, so
     // the viewpoint can be placed at full speed. The effective state is this
-    // toggle OR a held controller trigger or grip, resolved on the render
-    // thread each frame -- a trigger routed back through a Houdini cook
-    // would lag. Turning it off hands the exact same pose to the configured
+    // toggle OR either grip held (orbit, scrub), resolved on the render
+    // thread each frame -- a grip routed back through a Houdini cook would
+    // lag. Turning it off hands the exact same pose to the configured
     // delegate: if that's frozen, the freeze captures right there.
     void SetInteractive(bool on) { _interactive = on; }
+
+    // Controller buttons that change a setting living outside the runtime:
+    //   X            -- flip Interactive Placement (placement view <-> Renderer)
+    //   Y            -- flip Stereo
+    //   left trigger -- play / stop the playbar
+    // Invoked ON THE RENDER THREAD. The callee acts wherever the setting
+    // really lives (the node's parms, Houdini's playbar) and anything that
+    // matters comes back through the normal setters on the next cook, so the
+    // UI and the headset agree. With no callback set, the runtime flips its
+    // own Interactive/Stereo; playback needs a host with a playbar.
+    enum class Command
+    {
+        ToggleInteractive,
+        ToggleStereo,
+        TogglePlayback,
+    };
+    using CommandCallback = std::function<void(Command)>;
+    void SetCommandCallback(CommandCallback callback);
+
+    // Grip orbit: yaw (turning the controller about the vertical) is
+    // multiplied by this, so a comfortable wrist turn can carry the scene all
+    // the way round; pitch and roll stay 1:1.
+    void SetOrbitYawGain(float gain) { _orbitYawGain = gain; }
+
+    // Grip orbit without roll: only yaw and pitch (about the user's own
+    // horizontal right) are applied, so the horizon never tilts.
+    void SetOrbitYUp(bool on) { _orbitYUp = on; }
 
     // Whether the configured delegate renders both eyes (true) or a single
     // view shown to both -- half the work, which is what makes a progressive
@@ -105,10 +132,10 @@ public:
     using PlacementCallback = std::function<void(CameraPlacement const&)>;
     void SetPlacementCallback(PlacementCallback callback);
 
-    // Playbar scrub: hold the left trigger and twist the left controller
+    // Playbar scrub: hold the left grip and twist the left controller
     // about its pointing axis, clockwise (as seen along it) forward, like a
     // jog wheel. Frames per quarter turn of twist; 0 disables it. The twist
-    // is measured from the trigger press, so re-grabbing ratchets past the
+    // is measured from the grip press, so re-grabbing ratchets past the
     // wrist's range.
     void SetScrubRate(float framesPerQuarterTurn) { _scrubRate = framesPerQuarterTurn; }
 
@@ -177,6 +204,8 @@ private:
     std::atomic<bool>   _frozen{false};
     std::atomic<bool>   _interactive{false};
     std::atomic<bool>   _stereo{true};
+    std::atomic<float>  _orbitYawGain{3.0f};
+    std::atomic<bool>   _orbitYUp{true};
     std::atomic<bool>   _refreezeRequested{false};
     std::atomic<float>  _moveSpeed{1.5f};
     std::atomic<float>  _snapTurnDegrees{30.0f};
@@ -195,4 +224,5 @@ private:
     std::mutex        _callbackMutex;
     PlacementCallback _placementCallback;
     ScrubCallback     _scrubCallback;
+    CommandCallback   _commandCallback;
 };

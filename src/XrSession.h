@@ -75,6 +75,22 @@ public:
         bool     changed = false;
         std::function<void(int width, int height)> draw;
     };
+    // Single-eye rendering's picture, shown as a flat billboard fixed in the
+    // room rather than fed to both eyes as a projection layer -- which puts
+    // it at infinity with nothing moving as the head does, and is
+    // uncomfortable. While visible, the projection layer isn't submitted:
+    // the render callbacks still run (the caller does its per-frame
+    // bookkeeping there), but their images aren't presented. Redrawn every
+    // frame, since the image converges and the reticle moves.
+    struct Billboard
+    {
+        bool        visible = false;
+        EyeImage    image;          // texture, size and reticle; pose/fov unused
+        XrPosef     pose{};         // centre; the image faces +Z
+        XrExtent2Df size{};         // metres
+    };
+    void SetBillboard(Billboard const& billboard) { _billboard = billboard; }
+
     void SetPanel(Panel panel)
     {
         // Latched until actually drawn: a change on a frame the runtime says
@@ -94,12 +110,14 @@ public:
 
     // Either hand's trigger, 0..1, as of the most recent RenderFrame. One
     // action bound to both hands: OpenXR resolves that to whichever is pulled
-    // further, so no per-hand bookkeeping is needed. Reads 0 whenever input
-    // isn't active (session not focused, controllers asleep).
+    // further. Reads 0 whenever input isn't active (session not focused,
+    // controllers asleep).
     float TriggerValue() const { return _triggerValue; }
 
-    // The left trigger alone, 0..1 -- it doubles as the playbar scrub grab.
-    float LeftTriggerValue() const { return _leftTriggerValue; }
+    // True only on the frame the left trigger is pulled -- an edge taken
+    // from its analogue value with hysteresis (fires past 3/4 travel,
+    // re-arms below 1/4), since Touch triggers have no click.
+    bool LeftTriggerPressed() const { return _leftTriggerPressed; }
 
     // Right-hand thumbstick, each axis -1..1, +y pushed away from the user.
     // Zero whenever input isn't active.
@@ -114,14 +132,20 @@ public:
     bool ButtonA() const { return _buttonA; }
     bool ButtonB() const { return _buttonB; }
 
+    // True only on the frame the left controller's X / Y button is pressed.
+    bool ButtonXPressed() const { return _buttonXPressed; }
+    bool ButtonYPressed() const { return _buttonYPressed; }
+
     // True only on the frame the left menu button is pressed.
     bool LeftMenuPressed() const { return _leftMenuPressed; }
 
     // True only on the frame the right thumbstick is clicked down.
     bool RightThumbstickPressed() const { return _rightThumbstickPressed; }
 
-    // Right grip (squeeze), 0..1.
+    // Grip (squeeze), 0..1: the right grip orbits, the left scrubs the
+    // playbar. One action with both hands as subaction paths.
     float GripValue() const { return _gripValue; }
+    float LeftGripValue() const { return _leftGripValue; }
 
     // Right controller's aim pose in the reference space, located at the
     // previous frame's predicted display time. False if not tracked.
@@ -164,6 +188,8 @@ private:
     XrAction    _turnAction       = XR_NULL_HANDLE;
     XrAction    _thumbClickAction = XR_NULL_HANDLE;
     XrAction    _menuAction       = XR_NULL_HANDLE;
+    XrAction    _buttonXAction    = XR_NULL_HANDLE;
+    XrAction    _buttonYAction    = XR_NULL_HANDLE;
     XrAction    _buttonAAction    = XR_NULL_HANDLE;
     XrAction    _buttonBAction    = XR_NULL_HANDLE;
     XrAction    _gripAction       = XR_NULL_HANDLE;
@@ -173,15 +199,20 @@ private:
     XrPath      _leftHand         = XR_NULL_PATH;
     XrPath      _rightHand        = XR_NULL_PATH;
     float       _triggerValue     = 0.0f;
-    float       _leftTriggerValue = 0.0f;
+    float       _leftGripValue    = 0.0f;
     float       _gripValue        = 0.0f;
     XrVector2f  _rightThumbstick{0.0f, 0.0f};
     XrVector2f  _leftThumbstick{0.0f, 0.0f};
     bool        _rightThumbstickPressed = false;
     bool        _leftMenuPressed = false;
+    bool        _buttonXPressed  = false;
+    bool        _buttonYPressed  = false;
+    bool        _leftTriggerPressed = false;
+    bool        _leftTriggerDown    = false;   // hysteresis state; persists across syncs
     bool        _buttonA = false;
     bool        _buttonB = false;
     Panel       _panel;
+    Billboard   _billboard;
     bool        _panelDirty = false;
     XrPosef     _rightAimPose{};
     bool        _rightAimValid = false;

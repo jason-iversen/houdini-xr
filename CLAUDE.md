@@ -181,10 +181,30 @@ and showing it to both would leave the other eye a black strip on its outer
 edge. It's rendered at the union's size relative to one eye (`MonoScale`,
 ~1.14× wider on a Quest 2) to keep pixel density; that factor is latched once
 per session, since a render size that flickered by a pixel would restart a
-progressive delegate forever. Only `held[0]` renders; every other eye is a
-*mirror* that submits `held[0]`'s image, pose and FOV, and the compositor
-reprojects it to each eye. Convergence is judged on `held[0]` alone (a
-mirror never renders, so never converges). Switching mono ↔ stereo forces a
+progressive delegate forever. Only `held[0]` renders, and convergence is
+judged on it alone.
+
+**The single image is shown on a billboard, not as a projection layer.** It
+first went to both eyes as a projection layer with the cyclopean pose — which
+the compositor presents at infinity (identical images, zero disparity) with
+no motion parallax as the head moves, while the content reads as near. That
+was reported as uncomfortable. Now it's an `XrCompositionLayerQuad` fixed in
+the room: standing along the captured view at the depth of whatever was
+under the reticle at capture (a fresh gaze pick; 3m if nothing, clamped
+0.5–100m), sized and offset to exactly fill the captured (asymmetric)
+frustum at that depth. From the capture point it lines up with the scene;
+the looked-at object stays at its true depth; everything else is flattened
+onto that plane, like a photo standing in the room. While it's visible the
+session submits no projection layer at all (the eye callbacks still run for
+head tracking and the anchor latch, but their images aren't presented). The
+single view is rendered in `HxrRuntime` *before* `RenderFrame`, from the
+previous frame's located views — a world-locked quad makes the one-frame-old
+capture invisible, and its placement must be known before the frame is
+submitted. So mono only engages once views have been located
+(`haveLiveHead`); the very first frames are stereo. It's redrawn every frame
+(the image converges, the reticle moves), with mips like the desktop panel;
+both share `XrPresenterGL`'s quad swapchains (`Quad::Panel`,
+`Quad::Billboard`). Switching mono ↔ stereo forces a
 re-capture (the held pose means something different in each) and pauses the
 other eyes' own engines (`HydraRenderer::PauseView`) — a progressive delegate
 keeps accumulating in the background after its last render, so an idle
@@ -287,10 +307,20 @@ the pivot, so the scene turns *with* the hand (grab-and-turn; flip the delta
 to reverse). On release it's committed into `userXform`, and the final
 `worldFromStage` is computed **after** that commit — otherwise the release
 frame renders the pre-orbit placement for one frame, a visible flicker. Grip
-also counts as effective-interactive (the interactive renderer while held),
-for the same reason
-as the trigger: orbiting changes the view every frame, which would restart a
-progressive delegate continuously. The controller pose comes from an OpenXR
+also counts as effective-interactive (the interactive renderer while held):
+orbiting changes the view every frame, which would restart a progressive
+delegate continuously.
+
+The rotation isn't the hand's raw delta: `OrbitRotation` (XrMath.h) splits
+the world-frame delta `now ⊗ start⁻¹` (swing-twist) into yaw about world +Y
+and the remaining swing, multiplies the yaw by `Orbit Twist Gain` (default
+3), and with `Y-Up During Orbit` (default on) reduces the swing to its pitch
+about the user's horizontal right *latched at grip start* — dropping roll so
+the horizon never tilts. At gain 1 without Y-up it equals the old matrix
+formulation to ~1e-15 (checked in hython against `start⁻¹ * now` built with
+Gf); the quaternions are OpenXR's Hamilton convention, which
+`SetRotate(GfQuatd(w, x, y, z))` maps correctly, as `XrPoseToMatrix` relies
+on. The controller pose comes from an OpenXR
 action space located after `xrWaitFrame` (it needs the predicted display
 time), so it can't live in `_SyncInput`. While the orbit is active the
 reticle is drawn at the pivot — fixed in room space by construction, since
@@ -328,14 +358,15 @@ snapshot's camera is actually read).
 
 ### Playbar scrub also crosses back to the main thread
 
-Left trigger + twist of the left controller about its aim axis (`-Z`) scrubs
+Left grip + twist of the left controller about its aim axis (`-Z`) scrubs
 the playbar. `TwistAboutLocalZ` (XrMath.h) takes the twist component of the
-rotation since the trigger press (swing-twist decomposition), so pointing the
-controller elsewhere doesn't count; clockwise as the user sees it is negative
-about `+Z`, and maps forward. The target frame is `round(start + quarterTurns *
+rotation since the grip press (swing-twist decomposition), so pointing the
+controller elsewhere doesn't count; *positive* twist about the controller's
+`+Z` maps forward — clockwise as the user sees it, confirmed in the headset
+(the opposite sign, derived on paper, ran backwards). The target frame is `round(start + quarterTurns *
 Scrub Rate)`, and the start frame *tracks `_timeCode` until the first whole
-frame of movement* — otherwise a trigger pulled during playback, or held just
-for interactive placement, would yank the playbar back to the press frame.
+frame of movement* — otherwise a grip squeezed during playback would yank the
+playbar back to the press frame.
 
 The runtime reports each new target frame through a callback. The plugin
 coalesces: the latest frame goes into shared state and at most one
@@ -347,8 +378,8 @@ wrist stops. The event calls `hou.playbar.stop()` (if playing) then
 itself: the new frame comes back through the normal cook → `SetTimeCode`
 path, so there's only one source of truth for the time.
 
-The left trigger still counts as interactive placement, which is what a
-scrub needs anyway: each frame change would restart a progressive delegate.
+The left grip counts as interactive placement, like the right: each frame
+change would restart a progressive delegate.
 
 ### The desktop panel is captured at the OS level
 
@@ -393,12 +424,26 @@ a laptop's integrated-GPU display would fail at `wglDXOpenDeviceNV`.
 
 ### Interactive Placement is resolved on the render thread
 
-Effective state = the node toggle **OR** either controller trigger held past
-half travel (`XrViewportSession::TriggerValue()`). The node only ever sends
-*configured* values; `HxrRuntime` substitutes the Interactive Placement
-Renderer (Storm by default) / 0s / not-frozen while effective-interactive is
-true. A trigger routed back through a Houdini cook would lag, which is why
-this isn't node-level. On the node the toggle defaults **on** and Renderer
+Effective state = the node toggle **OR** either grip held past half travel
+(orbit, scrub). The node only ever sends *configured* values; `HxrRuntime`
+substitutes the Interactive Placement Renderer (Storm by default) / 0s /
+not-frozen while effective-interactive is true. A grip routed back through a
+Houdini cook would lag, which is why this isn't node-level.
+
+**Headset buttons act on the node's own parms**, not runtime-local
+overrides: X flips Interactive Placement, Y flips Stereo, the left trigger
+plays/stops the playbar. The runtime reports a `Command` through one
+callback; the plugin posts to the main thread and `setInt`s the parm (or
+calls `hou.playbar.play()/stop()` through HOM), and the resulting cook hands
+new values back through the normal setters — so the node's UI and the
+headset always agree. A toggle tolerates the cook's latency; a hold
+wouldn't. With no callback (the standalone exe) the runtime flips its own
+`_interactive` / `_stereo`; playback needs a host with a playbar. The
+triggers used to force interactive while held; with the toggle defaulting on
+that did nothing visible. The left trigger is now play/stop — an edge
+derived from its analogue value with hysteresis in `_SyncInput` (Touch
+triggers have no click); the right trigger is free (kept for clicking on the
+desktop panel). On the node the toggle defaults **on** and Renderer
 defaults to Karma XPU: place first, then render. The parms the toggle
 overrides (Renderer, Convergence Time, Freeze Pose, Refreeze Pose) are
 deliberately **not** greyed out, so the final render can be set up while
@@ -406,7 +451,7 @@ still placing — greying them meant turning placement off, which starts
 Karma, just to change them.
 
 The freeze capture happens on the *effective* frozen false→true transition, so
-releasing the trigger with Freeze Pose set freezes right there. The Apprentice
+pressing X or releasing a grip with Freeze Pose set freezes right there. The Apprentice
 cap is passed per renderer (`SetRendererMaxSize` /
 `SetInteractiveRendererMaxSize`) because it binds to a delegate: each applies
 only while its own renderer is the one rendering.
@@ -566,22 +611,24 @@ Node parameters: `Live`, `Interactive Placement`,
 `Interactive Placement Renderer`, `Renderer`, `Stereo`,
 `Max Render Resolution`, `Convergence Time`, `Freeze Pose`, `Refreeze Pose`,
 `Anchor Distance`, `Anchor Height`, `Resync Camera`, `Move Speed`,
-`Snap Turn Angle`, `Scrub Rate`, `Desktop Panel Width`, `Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
+`Snap Turn Angle`, `Orbit Twist Gain`, `Y-Up During Orbit`, `Scrub Rate`, `Desktop Panel Width`, `Show Reticle`, `Apply Camera Placement`, `Placement Translate`,
 `Placement Rotate`.
 
 **Controller input** (`XrViewportSession`, one action set): trigger (float,
-both hands as subaction paths — read combined, or the left alone), right
-thumbstick (Vector2f), left thumbstick (Vector2f), right thumbstick click
-(boolean, edge via `changedSinceLastSync`), left menu button (boolean, edge),
-A and B (boolean, level), right squeeze (float), aim pose
+both hands; the left read alone as a hysteresis edge), grip (float, both
+hands as subaction paths,
+read per hand), right thumbstick (Vector2f), left thumbstick (Vector2f),
+right thumbstick click (boolean, edge via `changedSinceLastSync`), left menu
+button, X and Y (boolean, edge), A and B (boolean, level), aim pose
 (both hands as subaction paths, one action space per hand). Actions sync at
 the top of every `RenderFrame`; the aim poses are located after
 `xrWaitFrame`. All read as zero / invalid when the session isn't focused. In
-the headset: either trigger held = interactive placement, right stick =
-dolly/strafe along/across the view, B/A = up/down,
-left stick flick = snap turn, right stick click = place the camera at the
-head, right grip held + turn = orbit about the reticle, left trigger held +
-twist = scrub the playbar, left menu button = show/hide the desktop panel.
+the headset: X = flip Interactive Placement, Y = flip Stereo, left trigger
+= play/stop the playbar, right stick = dolly/strafe
+along/across the view, B/A = up/down, left stick flick = snap turn, right
+stick click = place the camera at the head, right grip held + turn = orbit
+about the reticle, left grip held + twist = scrub the playbar, left menu
+button = show/hide the desktop panel.
 
 ---
 
@@ -627,8 +674,8 @@ in the plugin.
 
 Built but **not yet confirmed in-headset**: head-anchored placement (replacing
 the origin-anchored version), thumbstick locomotion, thumbstick-click camera
-placement, trigger-driven interactive placement, the reticle, grip orbit, snap turn,
-left-trigger playbar scrub, the desktop panel's quad layer and toggle (its
+placement, X-button interactive placement, the reticle, grip orbit (and its
+yaw gain / Y-up), snap turn, left-grip playbar scrub, the desktop panel's quad layer and toggle (its
 capture path is verified offscreen with `--desktop`). (The
 pick underneath the reticle and orbit *is* verified, offscreen, via `--pick`.)
 

@@ -123,6 +123,12 @@ void HxrRuntime::SetPlacementCallback(PlacementCallback callback)
     _placementCallback = std::move(callback);
 }
 
+void HxrRuntime::SetCommandCallback(CommandCallback callback)
+{
+    std::lock_guard<std::mutex> lock(_callbackMutex);
+    _commandCallback = std::move(callback);
+}
+
 void HxrRuntime::SetScrubCallback(ScrubCallback callback)
 {
     std::lock_guard<std::mutex> lock(_callbackMutex);
@@ -302,16 +308,22 @@ void HxrRuntime::ThreadMain()
 
     constexpr double kNearPlane = 0.05;
     constexpr double kFarPlane  = 5000.0;
-    constexpr float  kTriggerHeldThreshold = 0.5f;
 
     // What the node asked for vs what's actually running -- they differ while
-    // interactive placement (toggle, trigger or grip) substitutes the
+    // interactive placement (toggle or grip) substitutes the
     // interactive renderer.
     std::string configuredRenderer;
     std::string interactiveRenderer;   // empty = Storm
     std::string activeRenderer;
     bool        lastFrozen = false;
     bool        lastMono   = false;
+    // Where the single-eye billboard stands: at the depth of whatever was
+    // under the reticle when it was captured, so the thing being looked at
+    // stays at its true distance and only the rest is flattened onto it.
+    constexpr double kBillboardFallback = 3.0;    // metres, nothing under the reticle
+    constexpr double kBillboardMin      = 0.5;
+    constexpr double kBillboardMax      = 100.0;
+    double      billboardDistance = kBillboardFallback;
     // Latched once per session rather than re-derived every frame: if the
     // runtime's reported FOVs wobbled at all, a per-frame value could flip
     // the render size by a pixel and restart a progressive delegate forever.
@@ -348,18 +360,19 @@ void HxrRuntime::ThreadMain()
 
     // Grip orbit: while held, the stage rotates about the surface point under
     // the reticle by however the right controller has turned since the grip
-    // began -- grab-and-turn, so the scene turns with the hand. Committed into
-    // userXform on release.
+    // began -- grab-and-turn, so the scene turns with the hand, with yaw
+    // amplified (see OrbitRotation). Committed into userXform on release.
     constexpr float kGripHeldThreshold = 0.5f;
-    bool       gripWasHeld = false;
-    GfVec3d    orbitPivotRoom(0.0);
-    GfMatrix4d orbitStartRotation(1.0);   // controller orientation at grip start
-    GfMatrix4d orbitLive(1.0);
+    bool          gripWasHeld = false;
+    GfVec3d       orbitPivotRoom(0.0);
+    XrQuaternionf orbitStartOrientation{0.0f, 0.0f, 0.0f, 1.0f};   // at grip start
+    GfVec3d       orbitRight(1.0, 0.0, 0.0);   // user's horizontal right, at grip start
+    GfMatrix4d    orbitLive(1.0);
 
-    // Playbar scrub (left trigger + twist). The start frame follows the
-    // playbar until the twist first moves it a whole frame, so a trigger
-    // pulled during playback -- or just held for interactive placement --
-    // doesn't yank the playbar back to where it was at the press.
+    // Playbar scrub (left grip + twist). The start frame follows the
+    // playbar until the twist first moves it a whole frame, so a grip
+    // squeezed during playback doesn't yank the playbar back to where it was
+    // at the press.
     bool          scrubHeld  = false;
     bool          scrubMoved = false;
     XrQuaternionf scrubStartOrientation{0.0f, 0.0f, 0.0f, 1.0f};
@@ -467,24 +480,25 @@ void HxrRuntime::ThreadMain()
             interactiveRenderer = newInteractiveRenderer;
         }
 
-        // Effective state: the toggle, a trigger held past half travel, or an
-        // orbit in progress. Resolved here rather than in the node so a
-        // controller press takes effect this frame, not after a cook. Grip
-        // counts for the same reason the trigger does: orbiting changes the
-        // view every frame, which would restart a progressive delegate
-        // continuously -- so it's shown live in the interactive renderer, and
-        // releasing hands back to the configured delegate (freezing there if
-        // Freeze Pose is on).
-        const bool gripHeld = xr.GripValue() > kGripHeldThreshold;
-        const bool interactive =
-            _interactive.load() || xr.TriggerValue() > kTriggerHeldThreshold || gripHeld;
+        // Effective state: the toggle, or either grip held past half travel
+        // (an orbit or a scrub). Resolved here rather than in the node so a
+        // grip takes effect this frame, not after a cook. Both change the
+        // view every frame -- the camera, or the time -- which would restart
+        // a progressive delegate continuously, so they're shown live in the
+        // interactive renderer, and releasing hands back to the configured
+        // delegate (freezing there if Freeze Pose is on).
+        const bool gripHeld     = xr.GripValue() > kGripHeldThreshold;
+        const bool leftGripHeld = xr.LeftGripValue() > kGripHeldThreshold;
+        const bool interactive  = _interactive.load() || gripHeld || leftGripHeld;
         const bool  frozen          = !interactive && _frozen.load();
         const float convergeSeconds = interactive ? 0.0f : _convergeSeconds.load();
 
         // Single-eye rendering is for the configured delegate only:
         // interactive placement is always stereo -- it's cheap there, and
         // depth matters most while placing.
-        const bool mono         = !interactive && !_stereo.load() && viewCount > 1;
+        // Only once views have been located: the single view is captured
+        // from them before RenderFrame (see the billboard below).
+        const bool mono = !interactive && !_stereo.load() && viewCount > 1 && haveLiveHead;
         const bool monoSwitched = mono != lastMono;
         lastMono = mono;
 
@@ -641,14 +655,38 @@ void HxrRuntime::ThreadMain()
             xr.SetPanel(std::move(panel));
         }
 
+        // --- Toggles: X placement/Renderer, Y stereo, left trigger play ---
+        // Toggles, not holds: a progressive render is something to leave
+        // running and look around in. Flipped where each setting lives (the
+        // node's parms, Houdini's playbar, via the callback) so the UI agrees
+        // with the headset.
+        auto issue = [&](Command command) {
+            CommandCallback callback;
+            {
+                std::lock_guard<std::mutex> lock(_callbackMutex);
+                callback = _commandCallback;
+            }
+            if (callback) {
+                callback(command);
+            } else if (command == Command::ToggleInteractive) {
+                _interactive = !_interactive.load();
+            } else if (command == Command::ToggleStereo) {
+                _stereo = !_stereo.load();
+            }
+        };
+        if (xr.ButtonXPressed()) {
+            issue(Command::ToggleInteractive);
+        }
+        if (xr.ButtonYPressed()) {
+            issue(Command::ToggleStereo);
+        }
+        if (xr.LeftTriggerPressed()) {
+            issue(Command::TogglePlayback);
+        }
+
         // --- Grip orbit ---
         XrPosef    aimPose{};
         const bool aimValid = xr.RightAimPose(&aimPose);
-        auto rotationOnly = [](XrPosef const& pose) {
-            GfMatrix4d m = XrPoseToMatrix(pose);
-            m.SetTranslateOnly(GfVec3d(0.0));
-            return m;
-        };
 
         if (gripHeld && !gripWasHeld && haveLiveHead && anchorLatched && aimValid) {
             // Grip start. A fresh pick rather than the reticle's, which can be
@@ -659,14 +697,19 @@ void HxrRuntime::ThreadMain()
             orbitPivotRoom = pickAlongGaze(settled, &hitStage)
                                  ? settled.Transform(hitStage)
                                  : headCentre + headForward * kReticleMissDistance;
-            orbitStartRotation = rotationOnly(aimPose);
-            gripWasHeld        = true;
+            orbitStartOrientation = aimPose.orientation;
+            const GfVec3d forward = Horizontal(headForward);
+            orbitRight            = GfVec3d(-forward[2], 0.0, forward[0]);
+            gripWasHeld           = true;
         }
         if (gripHeld && gripWasHeld && aimValid) {
-            // Row-vector: the world-frame rotation taking the start
-            // orientation to the current one is start^-1 * now. Applied to
-            // the scene about the pivot, the scene turns with the hand.
-            const GfMatrix4d delta = orbitStartRotation.GetInverse() * rotationOnly(aimPose);
+            // The hand's rotation since the grip began, reshaped (yaw gain,
+            // optionally no roll), applied to the scene about the pivot. The
+            // pitch axis is the user's right *at grip start*, so turning the
+            // head mid-orbit doesn't change what the hand does.
+            const GfMatrix4d delta =
+                OrbitRotation(orbitStartOrientation, aimPose.orientation,
+                              double(_orbitYawGain.load()), _orbitYUp.load(), orbitRight);
             orbitLive = Translation(-orbitPivotRoom) * delta * Translation(orbitPivotRoom);
         }
         if (!gripHeld && gripWasHeld) {
@@ -720,8 +763,7 @@ void HxrRuntime::ThreadMain()
         {
             XrPosef    leftAim{};
             const bool leftAimValid = xr.LeftAimPose(&leftAim);
-            const bool leftTrigger  = xr.LeftTriggerValue() > kTriggerHeldThreshold;
-            if (!leftTrigger) {
+            if (!leftGripHeld) {
                 scrubHeld = false;
             } else if (!scrubHeld && leftAimValid) {
                 scrubHeld             = true;
@@ -734,10 +776,11 @@ void HxrRuntime::ThreadMain()
                 if (!scrubMoved) {
                     scrubStartFrame = _timeCode.load();
                 }
-                // Aim poses point down -Z, so clockwise as the user sees it
-                // is negative about the controller's +Z.
+                // Positive twist about the controller's +Z plays forward --
+                // clockwise, as the user sees it (confirmed in the headset;
+                // the opposite sign ran backwards).
                 const double quarterTurns =
-                    -TwistAboutLocalZ(scrubStartOrientation, leftAim.orientation) / (0.5 * M_PI);
+                    TwistAboutLocalZ(scrubStartOrientation, leftAim.orientation) / (0.5 * M_PI);
                 const double frame = std::round(scrubStartFrame + quarterTurns * rate);
                 if (scrubMoved ? frame != scrubLastFrame : frame != std::round(scrubStartFrame)) {
                     scrubMoved     = true;
@@ -802,8 +845,8 @@ void HxrRuntime::ThreadMain()
         const auto now = std::chrono::steady_clock::now();
 
         // Freezing captures the pose at the moment it takes effect -- whether
-        // from the toggle, or from a trigger being released with Freeze Pose
-        // set -- rather than keeping whatever was last held.
+        // from the toggle (or X), or from a grip being released with Freeze
+        // Pose set -- rather than keeping whatever was last held.
         const bool froze = frozen && !lastFrozen;
         lastFrozen = frozen;
 
@@ -827,13 +870,105 @@ void HxrRuntime::ThreadMain()
                         heldFor >= double(convergeSeconds);
         }
 
-        auto renderEye = [&](uint32_t index, XrView const& current) {
-            // Single-eye: every eye after the first shows eye 0's image, with
-            // eye 0's (cyclopean) pose and FOV -- the compositor reprojects
-            // it to each eye's actual pose.
-            const bool mirror = mono && index > 0;
-            HeldEye&   eye    = held[mirror ? 0 : index];
+        auto captureEye = [&](HeldEye& eye, XrView const& source) {
+            eye.pose      = source.pose;
+            eye.fov       = source.fov;
+            eye.view      = XrPoseToViewMatrix(source.pose);
+            eye.proj      = XrFovToProjectionMatrix(source.fov, kNearPlane, kFarPlane);
+            eye.held      = true;
+            eye.converged = false;
+            heldSince     = now;
+        };
 
+        // A frozen, converged eye has nothing left to render: keep presenting
+        // the frame it already has.
+        auto renderHeldEye = [&](uint32_t index) {
+            HeldEye& eye = held[index];
+            if (frozen && eye.converged) {
+                return;
+            }
+            renderer.RenderEye(int(index), worldFromStage * eye.view, eye.proj, timeCode);
+            eye.converged = renderer.IsConverged(int(index));
+
+            const HydraRenderer::ColorTexture colour = renderer.GetColorTexture(int(index));
+            if (index == 0 && (colour.width != lastTextureSize[0] ||
+                               colour.height != lastTextureSize[1])) {
+                lastTextureSize = GfVec2i(colour.width, colour.height);
+                std::printf("HxrRuntime: colour AOV texture %dx%d (render size %dx%d, "
+                            "swapchain %dx%d)\n",
+                            colour.width, colour.height,
+                            renderer.RenderSize()[0], renderer.RenderSize()[1],
+                            eyeSize[0], eyeSize[1]);
+            }
+            eye.image = XrViewportSession::EyeImage{
+                colour.id, colour.width, colour.height, eye.pose, eye.fov};
+        };
+
+        // Reticle on a copy, every frame: a frozen, converged eye reuses its
+        // image but the gaze still moves. Projected through the eye's *held*
+        // view, so it lines up with the geometry in that image; the
+        // compositor then reprojects both together to the live head pose.
+        auto withReticle = [&](HeldEye const& eye) {
+            XrViewportSession::EyeImage image = eye.image;
+            if (showReticle) {
+                const GfVec4d clip =
+                    GfVec4d(reticleRoom[0], reticleRoom[1], reticleRoom[2], 1.0) *
+                    (eye.view * eye.proj);
+                if (clip[3] > 1e-6) {   // in front of this eye
+                    image.reticleVisible = true;
+                    image.reticleNdcX    = float(clip[0] / clip[3]);
+                    image.reticleNdcY    = float(clip[1] / clip[3]);
+                }
+            }
+            return image;
+        };
+
+        // --- Single-eye: one render, on a billboard ---
+        // Rendered here, before RenderFrame, from the views it located last
+        // frame: the billboard is fixed in the room, so a capture pose one
+        // frame old is invisible, and its placement is then known before the
+        // frame is submitted. Shown on a flat quad standing where the
+        // captured view looked, sized to exactly fill that view -- from the
+        // capture point it lines up with the scene, and as the head moves it
+        // behaves like a picture in the room, not one at infinity glued to
+        // the eyes.
+        XrViewportSession::Billboard billboard;
+        if (mono) {
+            HeldEye& eye = held[0];
+            if (recapture || !eye.held) {
+                captureEye(eye, CyclopeanView(xr));
+
+                billboardDistance = kBillboardFallback;
+                GfVec3d hitStage;
+                if (pickAlongGaze(worldFromStage, &hitStage)) {
+                    const double depth =
+                        GfDot(worldFromStage.Transform(hitStage) - headCentre, headForward);
+                    if (depth > 0.0) {
+                        billboardDistance = std::clamp(depth, kBillboardMin, kBillboardMax);
+                    }
+                }
+            }
+            renderHeldEye(0);
+
+            // The asymmetric frustum's window at the billboard's depth,
+            // centred where it falls rather than on the view axis.
+            const double d  = billboardDistance;
+            const double l  = std::tan(double(eye.fov.angleLeft));
+            const double r  = std::tan(double(eye.fov.angleRight));
+            const double dn = std::tan(double(eye.fov.angleDown));
+            const double up = std::tan(double(eye.fov.angleUp));
+            const GfVec3d centre = XrPoseToMatrix(eye.pose).Transform(
+                GfVec3d(0.5 * (l + r) * d, 0.5 * (dn + up) * d, -d));
+
+            billboard.visible              = true;
+            billboard.image                = withReticle(eye);
+            billboard.pose.orientation     = eye.pose.orientation;
+            billboard.pose.position        = {float(centre[0]), float(centre[1]), float(centre[2])};
+            billboard.size                 = {float((r - l) * d), float((up - dn) * d)};
+        }
+        xr.SetBillboard(billboard);
+
+        auto renderEye = [&](uint32_t index, XrView const& current) {
             if (index < 2) {
                 eyePos[index] = XrPoseToMatrix(current.pose).ExtractTranslation();
                 haveEye1      = haveEye1 || index == 1;
@@ -859,55 +994,21 @@ void HxrRuntime::ThreadMain()
                             anchorHead.position[2]);
             }
 
+            // Single-eye already rendered above, onto the billboard; the
+            // session doesn't present this (it isn't submitted as a
+            // projection layer), so only the bookkeeping above matters.
+            if (mono) {
+                return withReticle(held[0]);
+            }
+
             // An eye that has never captured a pose has nothing valid to
             // submit, whatever the frame-level decision was.
-            if (!mirror && (recapture || !eye.held)) {
-                const XrView source = mono ? CyclopeanView(xr) : current;
-                eye.pose      = source.pose;
-                eye.fov       = source.fov;
-                eye.view      = XrPoseToViewMatrix(source.pose);
-                eye.proj      = XrFovToProjectionMatrix(source.fov, kNearPlane, kFarPlane);
-                eye.held      = true;
-                eye.converged = false;
-                heldSince     = now;
+            HeldEye& eye = held[index];
+            if (recapture || !eye.held) {
+                captureEye(eye, current);
             }
-
-            // A frozen, converged eye has nothing left to render: keep
-            // presenting the frame it already has.
-            if (!mirror && !(frozen && eye.converged)) {
-                renderer.RenderEye(int(index), worldFromStage * eye.view, eye.proj, timeCode);
-                eye.converged = renderer.IsConverged(int(index));
-
-                const HydraRenderer::ColorTexture colour = renderer.GetColorTexture(int(index));
-                if (index == 0 && (colour.width != lastTextureSize[0] ||
-                                   colour.height != lastTextureSize[1])) {
-                    lastTextureSize = GfVec2i(colour.width, colour.height);
-                    std::printf("HxrRuntime: colour AOV texture %dx%d (render size %dx%d, "
-                                "swapchain %dx%d)\n",
-                                colour.width, colour.height,
-                                renderer.RenderSize()[0], renderer.RenderSize()[1],
-                                eyeSize[0], eyeSize[1]);
-                }
-                eye.image = XrViewportSession::EyeImage{
-                    colour.id, colour.width, colour.height, eye.pose, eye.fov};
-            }
-
-            // Reticle on a copy, every frame: a frozen, converged eye reuses
-            // its image but the gaze still moves. Projected through the eye's
-            // *held* view, so it lines up with the geometry in that image; the
-            // compositor then reprojects both together to the live head pose.
-            XrViewportSession::EyeImage image = eye.image;
-            if (showReticle) {
-                const GfVec4d clip =
-                    GfVec4d(reticleRoom[0], reticleRoom[1], reticleRoom[2], 1.0) *
-                    (eye.view * eye.proj);
-                if (clip[3] > 1e-6) {   // in front of this eye
-                    image.reticleVisible = true;
-                    image.reticleNdcX    = float(clip[0] / clip[3]);
-                    image.reticleNdcY    = float(clip[1] / clip[3]);
-                }
-            }
-            return image;
+            renderHeldEye(index);
+            return withReticle(eye);
         };
 
         if (!xr.RenderFrame(renderEye)) {

@@ -93,13 +93,24 @@ bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth,
         return false;
     }
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, _readFbo);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D, srcTexture, 0);
-
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _drawFbo);
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, target.images[index].image, 0);
+    BlitLinear(srcTexture, srcWidth, srcHeight, int(_width), int(_height),
+               reticleVisible, reticleNdcX, reticleNdcY);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+    XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    return XR_SUCCEEDED(xrReleaseSwapchainImage(target.swapchain, &releaseInfo));
+}
+
+void XrPresenterGL::BlitLinear(uint32_t srcTexture, int srcWidth, int srcHeight, int dstWidth,
+                               int dstHeight, bool reticleVisible, float reticleNdcX,
+                               float reticleNdcY)
+{
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, _readFbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, srcTexture, 0);
 
     // glBlitFramebuffer ignores the viewport but honours the scissor test.
     // Hydra's render pass sets a scissor rect matching its render size and
@@ -114,40 +125,37 @@ bool XrPresenterGL::PresentEye(uint32_t view, uint32_t srcTexture, int srcWidth,
         glEnable(GL_FRAMEBUFFER_SRGB);
     }
     glBlitFramebuffer(0, 0, srcWidth, srcHeight,
-                      0, 0, int(_width), int(_height),
+                      0, 0, dstWidth, dstHeight,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
     if (_srgb) {
         glDisable(GL_FRAMEBUFFER_SRGB);
     }
 
-    // Into the swapchain image after the blit, so the compositor reprojects
-    // it along with the frame and it stays locked to the held pose's
-    // geometry. NDC maps straight onto swapchain pixels whatever the render
-    // size was, since the blit stretches to fill.
+    // Into the image after the blit, so the compositor reprojects it along
+    // with the frame and it stays locked to the held pose's geometry. NDC
+    // maps straight onto target pixels whatever the render size was, since
+    // the blit stretches to fill.
     if (reticleVisible) {
-        DrawReticle(int(_width), int(_height), reticleNdcX, reticleNdcY);
+        DrawReticle(dstWidth, dstHeight, reticleNdcX, reticleNdcY);
     }
 
     if (scissorWasEnabled) {
         glEnable(GL_SCISSOR_TEST);
     }
-
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-    XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    return XR_SUCCEEDED(xrReleaseSwapchainImage(target.swapchain, &releaseInfo));
 }
 
-bool XrPresenterGL::EnsurePanelSwapchain(uint32_t width, uint32_t height, bool* created)
+bool XrPresenterGL::EnsureQuadSwapchain(Quad quad, uint32_t width, uint32_t height,
+                                        bool* created)
 {
+    QuadChain& q = _quads[int(quad)];
     *created = false;
-    if (_panel.swapchain != XR_NULL_HANDLE && width == _panelWidth && height == _panelHeight) {
+    if (q.chain.swapchain != XR_NULL_HANDLE && width == q.width && height == q.height) {
         return true;
     }
-    if (_panel.swapchain != XR_NULL_HANDLE) {
-        xrDestroySwapchain(_panel.swapchain);
-        _panel = {};
+    if (q.chain.swapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(q.chain.swapchain);
+        q = {};
     }
 
     // A full mip chain, falling back to none if the runtime refuses it.
@@ -167,67 +175,69 @@ bool XrPresenterGL::EnsurePanelSwapchain(uint32_t width, uint32_t height, bool* 
     info.faceCount   = 1;
     info.arraySize   = 1;
     info.mipCount    = mips;
-    if (XR_FAILED(xrCreateSwapchain(_session, &info, &_panel.swapchain))) {
+    if (XR_FAILED(xrCreateSwapchain(_session, &info, &q.chain.swapchain))) {
         info.mipCount = mips = 1;
-        if (XR_FAILED(xrCreateSwapchain(_session, &info, &_panel.swapchain))) {
-            std::fprintf(stderr, "XrPresenterGL: xrCreateSwapchain failed for the panel\n");
-            _panel.swapchain = XR_NULL_HANDLE;
+        if (XR_FAILED(xrCreateSwapchain(_session, &info, &q.chain.swapchain))) {
+            std::fprintf(stderr, "XrPresenterGL: xrCreateSwapchain failed for a quad layer\n");
+            q = {};
             return false;
         }
     }
 
     uint32_t imageCount = 0;
-    xrEnumerateSwapchainImages(_panel.swapchain, 0, &imageCount, nullptr);
-    _panel.images.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR});
+    xrEnumerateSwapchainImages(q.chain.swapchain, 0, &imageCount, nullptr);
+    q.chain.images.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR});
     if (XR_FAILED(xrEnumerateSwapchainImages(
-            _panel.swapchain, imageCount, &imageCount,
-            reinterpret_cast<XrSwapchainImageBaseHeader*>(_panel.images.data())))) {
-        xrDestroySwapchain(_panel.swapchain);
-        _panel = {};
+            q.chain.swapchain, imageCount, &imageCount,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(q.chain.images.data())))) {
+        xrDestroySwapchain(q.chain.swapchain);
+        q = {};
         return false;
     }
 
-    _panelWidth  = width;
-    _panelHeight = height;
-    _panelMips   = mips;
-    *created     = true;
-    std::printf("XrPresenterGL: panel swapchain %ux%u, %u mips%s\n", width, height, mips,
-                _srgb ? "" : " (not sRGB -- the desktop will look washed out)");
+    q.width  = width;
+    q.height = height;
+    q.mips   = mips;
+    *created = true;
+    std::printf("XrPresenterGL: %s swapchain %ux%u, %u mips%s\n",
+                quad == Quad::Panel ? "panel" : "billboard", width, height, mips,
+                _srgb ? "" : " (not sRGB -- colours will be off)");
     return true;
 }
 
-bool XrPresenterGL::PresentPanel(std::function<void(int width, int height)> const& draw)
+bool XrPresenterGL::PresentQuad(Quad quad, std::function<void(int width, int height)> const& draw)
 {
-    if (_panel.swapchain == XR_NULL_HANDLE) {
+    QuadChain& q = _quads[int(quad)];
+    if (q.chain.swapchain == XR_NULL_HANDLE) {
         return false;
     }
 
     uint32_t index = 0;
     XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(xrAcquireSwapchainImage(_panel.swapchain, &acquireInfo, &index))) {
+    if (XR_FAILED(xrAcquireSwapchainImage(q.chain.swapchain, &acquireInfo, &index))) {
         return false;
     }
     XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     waitInfo.timeout = XR_INFINITE_DURATION;
-    if (XR_FAILED(xrWaitSwapchainImage(_panel.swapchain, &waitInfo))) {
+    if (XR_FAILED(xrWaitSwapchainImage(q.chain.swapchain, &waitInfo))) {
         return false;
     }
 
-    const GLuint image = _panel.images[index].image;
+    const GLuint image = q.chain.images[index].image;
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _drawFbo);
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
-    draw(int(_panelWidth), int(_panelHeight));
+    draw(int(q.width), int(q.height));
     glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
-    if (_panelMips > 1) {
+    if (q.mips > 1) {
         glBindTexture(GL_TEXTURE_2D, image);
         glGenerateMipmap(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
     XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    return XR_SUCCEEDED(xrReleaseSwapchainImage(_panel.swapchain, &releaseInfo));
+    return XR_SUCCEEDED(xrReleaseSwapchainImage(q.chain.swapchain, &releaseInfo));
 }
 
 void XrPresenterGL::Destroy()
@@ -239,12 +249,12 @@ void XrPresenterGL::Destroy()
     }
     _views.clear();
 
-    if (_panel.swapchain != XR_NULL_HANDLE) {
-        xrDestroySwapchain(_panel.swapchain);
+    for (QuadChain& q : _quads) {
+        if (q.chain.swapchain != XR_NULL_HANDLE) {
+            xrDestroySwapchain(q.chain.swapchain);
+        }
+        q = {};
     }
-    _panel       = {};
-    _panelWidth  = 0;
-    _panelHeight = 0;
 
     if (_readFbo) {
         glDeleteFramebuffers(1, &_readFbo);

@@ -119,6 +119,21 @@ void SetPlaybarFrame(double frame)
     HOM().setFrame(frame);
 }
 
+// Main thread only. hou.playbar.play() / stop() -- the headset's left
+// trigger. Without a UI (hbatch) there's no playbar, so nothing happens.
+void TogglePlayback()
+{
+    try {
+        HOM_playbar& playbar = HOM().playbar();
+        if (playbar.isPlaying()) {
+            playbar.stop();
+        } else {
+            playbar.play();
+        }
+    } catch (HOM_Error&) {
+    }
+}
+
 } // namespace
 
 void
@@ -147,6 +162,8 @@ static PRM_Name theHeightName("height", "Anchor Height");
 static PRM_Name theResyncName("resync", "Resync Camera");
 static PRM_Name theMoveSpeedName("movespeed", "Move Speed");
 static PRM_Name theSnapTurnName("snapturn", "Snap Turn Angle");
+static PRM_Name theOrbitGainName("orbitgain", "Orbit Twist Gain");
+static PRM_Name theOrbitYUpName("orbityup", "Y-Up During Orbit");
 static PRM_Name theScrubRateName("scrubrate", "Scrub Rate");
 static PRM_Name thePanelWidthName("panelwidth", "Desktop Panel Width");
 static PRM_Name theShowReticleName("showreticle", "Show Reticle");
@@ -161,11 +178,13 @@ static PRM_Default theDistDefault(2.0);
 static PRM_Default theHeightDefault(1.2);
 static PRM_Default theMoveSpeedDefault(1.5);
 static PRM_Default theSnapTurnDefault(30.0);
+static PRM_Default theOrbitGainDefault(3.0);
 static PRM_Default theScrubRateDefault(24.0);
 static PRM_Default thePanelWidthDefault(1.2);
 
 static PRM_Range theConvergeRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 10.0);
 static PRM_Range theSnapTurnRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_RESTRICTED, 180.0);
+static PRM_Range theOrbitGainRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 6.0);
 static PRM_Range theScrubRateRange(PRM_RANGE_RESTRICTED, 0.0, PRM_RANGE_UI, 96.0);
 static PRM_Range thePanelWidthRange(PRM_RANGE_RESTRICTED, 0.1, PRM_RANGE_UI, 3.0);
 
@@ -224,8 +243,9 @@ LOP_XrOutput::myTemplateList[] = {
     // turning it off hands over to the configured delegate and settings at
     // that exact pose. On by default: place first, then render.
     PRM_Template(PRM_TOGGLE, 1, &theInteractiveName, PRMoneDefaults),
-    // What interactive placement renders with -- the toggle, a held trigger,
-    // or a held grip. Something that renders a clean frame in one pass.
+    // What interactive placement renders with -- the toggle (X in the
+    // headset), or a held grip. Something that renders a clean frame in one
+    // pass.
     PRM_Template(PRM_STRING, 1, &theInteractiveRendererName, &theInteractiveRendererDefault,
                  &theRendererMenu),
     PRM_Template(PRM_STRING, 1, &theRendererName, &theRendererDefault, &theRendererMenu),
@@ -252,7 +272,12 @@ LOP_XrOutput::myTemplateList[] = {
     PRM_Template(PRM_FLT,    1, &theMoveSpeedName, &theMoveSpeedDefault),
     // Degrees per flick of the left thumbstick; 0 turns snap turn off.
     PRM_Template(PRM_FLT,    1, &theSnapTurnName, &theSnapTurnDefault, 0, &theSnapTurnRange),
-    // Left trigger + twist scrubs the playbar: frames per quarter turn of
+    // Right-grip orbit: turning the controller about the vertical is
+    // multiplied by this; pitch and roll stay 1:1.
+    PRM_Template(PRM_FLT,    1, &theOrbitGainName, &theOrbitGainDefault, 0, &theOrbitGainRange),
+    // Orbit without roll: yaw and pitch only, so the horizon stays level.
+    PRM_Template(PRM_TOGGLE, 1, &theOrbitYUpName, PRMoneDefaults),
+    // Left grip + twist scrubs the playbar: frames per quarter turn of
     // the wrist, clockwise forward. 0 turns scrubbing off.
     PRM_Template(PRM_FLT,    1, &theScrubRateName, &theScrubRateDefault, 0, &theScrubRateRange),
     // The left menu button shows the monitor Houdini is on, on a panel 1m
@@ -295,6 +320,30 @@ LOP_XrOutput::LOP_XrOutput(OP_Network* net, const char* name, OP_Operator* op)
         UT_HoudiniExecutionContext::instance()->post([nodeId, placement]() {
             if (auto* node = dynamic_cast<LOP_XrOutput*>(OP_Node::lookupNode(nodeId))) {
                 node->applyPlacement(placement);
+            }
+        });
+    });
+
+    // Headset buttons act on the node's own parms and Houdini's playbar, so
+    // the UI shows what the headset is doing; the resulting cook hands new
+    // values back through the runtime's setters.
+    myRuntime->SetCommandCallback([nodeId](HxrRuntime::Command command) {
+        if (!UT_HoudiniExecutionContext::hasInstance()) {
+            return;
+        }
+        UT_HoudiniExecutionContext::instance()->post([nodeId, command]() {
+            if (command == HxrRuntime::Command::TogglePlayback) {
+                TogglePlayback();
+                return;
+            }
+            auto* node = dynamic_cast<LOP_XrOutput*>(OP_Node::lookupNode(nodeId));
+            if (!node) {
+                return;
+            }
+            if (command == HxrRuntime::Command::ToggleInteractive) {
+                node->flipToggle(theInteractiveName.getToken(), theInteractiveName.getLabel());
+            } else if (command == HxrRuntime::Command::ToggleStereo) {
+                node->flipToggle(theStereoName.getToken(), theStereoName.getLabel());
             }
         });
     });
@@ -392,9 +441,9 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
                          float(evalFloat(theHeightName, 0, t)));
 
     // The node only ever hands over what's *configured*. Interactive
-    // Placement -- from this toggle, or from a controller trigger held in the
-    // headset -- is resolved on the render thread, where it can take effect
-    // the same frame rather than after a cook.
+    // Placement -- from this toggle, or from a grip held in the headset --
+    // is resolved on the render thread, where it can take effect the same
+    // frame rather than after a cook.
     UT_String rendererParm;
     evalString(rendererParm, theRendererName, 0, t);
     const std::string rendererId = rendererParm.toStdString();
@@ -427,6 +476,8 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     myRuntime->SetFrozen(evalInt(theFrozenName, 0, t) != 0);
     myRuntime->SetMoveSpeed(float(evalFloat(theMoveSpeedName, 0, t)));
     myRuntime->SetSnapTurnDegrees(float(evalFloat(theSnapTurnName, 0, t)));
+    myRuntime->SetOrbitYawGain(float(evalFloat(theOrbitGainName, 0, t)));
+    myRuntime->SetOrbitYUp(evalInt(theOrbitYUpName, 0, t) != 0);
     myRuntime->SetScrubRate(float(evalFloat(theScrubRateName, 0, t)));
     myRuntime->SetPanelWidth(float(evalFloat(thePanelWidthName, 0, t)));
     myRuntime->SetShowReticle(evalInt(theShowReticleName, 0, t) != 0);
@@ -516,6 +567,15 @@ LOP_XrOutput::cookMyLop(OP_Context& context)
     }
 
     return error();
+}
+
+void
+LOP_XrOutput::flipToggle(const char* parmName, const char* label)
+{
+    const fpreal t  = CHgetEvalTime();
+    const bool   on = evalInt(parmName, 0, t) != 0;
+    setInt(parmName, 0, t, on ? 0 : 1);
+    std::printf("hxr_output: %s %s (headset)\n", label, on ? "off" : "on");
 }
 
 void

@@ -37,6 +37,9 @@ private:
     // those parms.
     void applyPlacement(HxrRuntime::CameraPlacement const& placement);
 
+    // Main thread only. Flips a toggle parm -- the headset's X and Y buttons.
+    void flipToggle(const char* parmName, const char* label);
+
     std::unique_ptr<HxrRuntime> myRuntime;
 
     // Houdini's own "data got dirtied" counter for our input, used to decide

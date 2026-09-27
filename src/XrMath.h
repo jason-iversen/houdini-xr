@@ -70,3 +70,60 @@ inline double TwistAboutLocalZ(XrQuaternionf const& start, XrQuaternionf const& 
     }
     return 2.0 * std::atan2(z, w);
 }
+
+// The grip orbit's rotation: how the scene turns, given the controller's
+// orientation when the grip began and now (OpenXR quaternions). Returned as a
+// row-vector rotation matrix in the reference space; the caller applies it
+// about the pivot.
+//
+// The hand's rotation is split (swing-twist) into yaw about world +Y and the
+// swing that remains. Yaw is multiplied by `yawGain`, so a comfortable wrist
+// turn can carry the scene all the way round; the swing stays 1:1. With
+// `yUp`, the swing is reduced to its pitch about `rightAxis` (the user's
+// horizontal right) -- dropping roll, so the horizon never tilts. At gain 1
+// without yUp this is exactly the hand's own rotation.
+inline GfMatrix4d OrbitRotation(XrQuaternionf const& start, XrQuaternionf const& now,
+                                double yawGain, bool yUp, GfVec3d const& rightAxis)
+{
+    struct Q
+    {
+        double w, x, y, z;
+    };
+    // Hamilton product: a * b applies b, then a.
+    auto mul = [](Q a, Q b) {
+        return Q{a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+                 a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                 a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                 a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w};
+    };
+    auto conj = [](Q q) { return Q{q.w, -q.x, -q.y, -q.z}; };
+    auto axisAngle = [](GfVec3d const& axis, double radians) {
+        const double s = std::sin(0.5 * radians);
+        return Q{std::cos(0.5 * radians), axis[0] * s, axis[1] * s, axis[2] * s};
+    };
+    // Angle of the rotation about `axis` contained in q (its twist), -pi..pi.
+    auto twistAngle = [](Q q, GfVec3d const& axis) {
+        double w = q.w;
+        double d = q.x * axis[0] + q.y * axis[1] + q.z * axis[2];
+        if (w < 0.0) {   // q and -q are the same rotation; take the short way
+            w = -w;
+            d = -d;
+        }
+        return (std::abs(w) + std::abs(d) < 1e-12) ? 0.0 : 2.0 * std::atan2(d, w);
+    };
+
+    const Q      s{start.w, start.x, start.y, start.z};
+    const Q      n{now.w, now.x, now.y, now.z};
+    const Q      delta = mul(n, conj(s));   // world-frame rotation, start -> now
+    const GfVec3d up(0.0, 1.0, 0.0);
+    const double yaw   = twistAngle(delta, up);
+    Q            swing = mul(delta, conj(axisAngle(up, yaw)));
+    if (yUp) {
+        swing = axisAngle(rightAxis, twistAngle(swing, rightAxis));
+    }
+    const Q result = mul(swing, axisAngle(up, yawGain * yaw));
+
+    GfMatrix4d m(1.0);
+    m.SetRotate(GfQuatd(result.w, result.x, result.y, result.z));
+    return m;
+}

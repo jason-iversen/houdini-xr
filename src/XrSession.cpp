@@ -125,9 +125,9 @@ bool XrViewportSession::_InitImpl(GLContext const& gl)
     }
 
     // Controller input is a convenience, not a requirement: a runtime with no
-    // controller profile still gets a working (trigger-less) session.
+    // controller profile still gets a working (controller-less) session.
     if (!_InitInput()) {
-        std::fprintf(stderr, "Controller input unavailable; trigger override disabled\n");
+        std::fprintf(stderr, "Controller input unavailable; controls disabled\n");
     }
     return true;
 }
@@ -147,9 +147,9 @@ bool XrViewportSession::_InitInput()
         return p;
     };
 
-    // The trigger and aim actions declare both hands as subaction paths, so
-    // each hand can be read on its own. Queried without one, the trigger
-    // still resolves to whichever hand is pulled further.
+    // The trigger, grip and aim actions declare both hands as subaction
+    // paths, so each hand can be read on its own. Queried without one, a
+    // float action resolves to whichever hand is pulled further.
     _leftHand  = path("/user/hand/left");
     _rightHand = path("/user/hand/right");
     const XrPath hands[] = {_leftHand, _rightHand};
@@ -216,10 +216,28 @@ bool XrViewportSession::_InitInput()
         return false;
     }
 
+    XrActionCreateInfo xInfo{XR_TYPE_ACTION_CREATE_INFO};
+    xInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(xInfo.actionName, "toggle_renderer", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(xInfo.localizedActionName, "Toggle Renderer", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &xInfo, &_buttonXAction), "xrCreateAction")) {
+        return false;
+    }
+
+    XrActionCreateInfo yInfo{XR_TYPE_ACTION_CREATE_INFO};
+    yInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    std::strncpy(yInfo.actionName, "toggle_stereo", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(yInfo.localizedActionName, "Toggle Stereo", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (Failed(xrCreateAction(_actionSet, &yInfo, &_buttonYAction), "xrCreateAction")) {
+        return false;
+    }
+
     XrActionCreateInfo gripInfo{XR_TYPE_ACTION_CREATE_INFO};
     gripInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
-    std::strncpy(gripInfo.actionName, "orbit", XR_MAX_ACTION_NAME_SIZE - 1);
-    std::strncpy(gripInfo.localizedActionName, "Orbit", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    gripInfo.countSubactionPaths = uint32_t(std::size(hands));
+    gripInfo.subactionPaths      = hands;
+    std::strncpy(gripInfo.actionName, "grip", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(gripInfo.localizedActionName, "Grip", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
     if (Failed(xrCreateAction(_actionSet, &gripInfo, &_gripAction), "xrCreateAction")) {
         return false;
     }
@@ -235,7 +253,7 @@ bool XrViewportSession::_InitInput()
     }
 
     // Suggest per profile; a runtime ignores profiles it doesn't know. The
-    // trigger and aim actions bind to both hands; move is the right stick,
+    // trigger, grip and aim actions bind to both hands; move is the right stick,
     // turn the left. The Khronos simple profile has no thumbstick, so it only gets
     // the trigger.
     bool anyAccepted = false;
@@ -251,6 +269,9 @@ bool XrViewportSession::_InitInput()
             {_buttonAAction,    path("/user/hand/right/input/a/click")},
             {_buttonBAction,    path("/user/hand/right/input/b/click")},
             {_gripAction,       path("/user/hand/right/input/squeeze/value")},
+            {_gripAction,       path("/user/hand/left/input/squeeze/value")},
+            {_buttonXAction,    path("/user/hand/left/input/x/click")},
+            {_buttonYAction,    path("/user/hand/left/input/y/click")},
             {_aimPoseAction,    path("/user/hand/right/input/aim/pose")},
             {_aimPoseAction,    path("/user/hand/left/input/aim/pose")},
         };
@@ -327,7 +348,10 @@ void XrViewportSession::_LocateControllers(XrTime time)
 void XrViewportSession::_SyncInput()
 {
     _triggerValue           = 0.0f;
-    _leftTriggerValue       = 0.0f;
+    _leftGripValue          = 0.0f;
+    _buttonXPressed         = false;
+    _buttonYPressed         = false;
+    _leftTriggerPressed     = false;
     _gripValue              = 0.0f;
     _rightThumbstick        = {0.0f, 0.0f};
     _leftThumbstick         = {0.0f, 0.0f};
@@ -356,13 +380,19 @@ void XrViewportSession::_SyncInput()
         _triggerValue = trigger.currentState;
     }
 
+    // The left trigger alone, as a click. Inactive input reads as released.
     getInfo.subactionPath = _leftHand;
     XrActionStateFloat leftTrigger{XR_TYPE_ACTION_STATE_FLOAT};
-    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &leftTrigger)) &&
-        leftTrigger.isActive) {
-        _leftTriggerValue = leftTrigger.currentState;
-    }
+    const float leftValue =
+        (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &leftTrigger)) &&
+         leftTrigger.isActive) ? leftTrigger.currentState : 0.0f;
     getInfo.subactionPath = XR_NULL_PATH;
+    if (!_leftTriggerDown && leftValue > 0.75f) {
+        _leftTriggerDown    = true;
+        _leftTriggerPressed = true;
+    } else if (_leftTriggerDown && leftValue < 0.25f) {
+        _leftTriggerDown = false;
+    }
 
     getInfo.action = _thumbstickAction;
     XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
@@ -401,11 +431,30 @@ void XrViewportSession::_SyncInput()
         _buttonB = buttonB.currentState != XR_FALSE;
     }
 
+    getInfo.action = _buttonXAction;
+    XrActionStateBoolean buttonX{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonX)) && buttonX.isActive) {
+        _buttonXPressed = buttonX.changedSinceLastSync && buttonX.currentState;
+    }
+    getInfo.action = _buttonYAction;
+    XrActionStateBoolean buttonY{XR_TYPE_ACTION_STATE_BOOLEAN};
+    if (XR_SUCCEEDED(xrGetActionStateBoolean(_session, &getInfo, &buttonY)) && buttonY.isActive) {
+        _buttonYPressed = buttonY.changedSinceLastSync && buttonY.currentState;
+    }
+
+    // Per hand, through the subaction paths.
     getInfo.action = _gripAction;
+    getInfo.subactionPath = _rightHand;
     XrActionStateFloat grip{XR_TYPE_ACTION_STATE_FLOAT};
     if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &grip)) && grip.isActive) {
         _gripValue = grip.currentState;
     }
+    getInfo.subactionPath = _leftHand;
+    XrActionStateFloat leftGrip{XR_TYPE_ACTION_STATE_FLOAT};
+    if (XR_SUCCEEDED(xrGetActionStateFloat(_session, &getInfo, &leftGrip)) && leftGrip.isActive) {
+        _leftGripValue = leftGrip.currentState;
+    }
+    getInfo.subactionPath = XR_NULL_PATH;
 }
 
 bool XrViewportSession::PollEvents()
@@ -458,6 +507,7 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
     }
 
     std::vector<XrCompositionLayerProjectionView> projectionViews;
+    bool viewsRendered = false;   // this frame's views were located and rendered
 
     if (frameState.shouldRender == XR_TRUE) {
         XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
@@ -476,10 +526,16 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
             (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
 
         if (posesValid) {
-            projectionViews.resize(located);
+            const bool billboard = _billboard.visible;
+            if (!billboard) {
+                projectionViews.resize(located);
+            }
 
             for (uint32_t i = 0; i < located; ++i) {
                 const EyeImage image = renderEye(i, _views[i]);
+                if (billboard) {
+                    continue;
+                }
                 if (!_presenter.PresentEye(i, image.texture, image.width, image.height,
                                            image.reticleVisible,
                                            image.reticleNdcX, image.reticleNdcY)) {
@@ -495,6 +551,7 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
                                                                 int32_t(_eyeHeight)};
                 projectionViews[i].subImage.imageArrayIndex = 0;
             }
+            viewsRendered = true;
         }
     }
 
@@ -503,33 +560,63 @@ bool XrViewportSession::RenderFrame(RenderEyeFn const& renderEye)
     layer.viewCount  = uint32_t(projectionViews.size());
     layer.views      = projectionViews.data();
 
-    const XrCompositionLayerBaseHeader* layers[2] = {
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer), nullptr};
-    uint32_t layerCount = projectionViews.empty() ? 0u : 1u;
+    const XrCompositionLayerBaseHeader* layers[3] = {};
+    uint32_t layerCount = 0;
+    if (!projectionViews.empty()) {
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+    }
 
-    // The panel goes after the projection layer, so it draws on top -- even
-    // over scene geometry that's nearer. A panel failure only drops the
-    // panel; the scene still presents.
-    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    if (layerCount > 0 && _panel.visible && _panel.draw && _panel.width > 0 &&
-        _panel.height > 0) {
+    auto quadLayer = [this](XrCompositionLayerQuad& quad, XrPresenterGL::Quad which,
+                            XrPosef const& pose, XrExtent2Df const& size) {
+        quad.space         = _space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = _presenter.QuadSwapchain(which);
+        quad.subImage.imageRect.offset = {0, 0};
+        quad.subImage.imageRect.extent = {int32_t(_presenter.QuadWidth(which)),
+                                          int32_t(_presenter.QuadHeight(which))};
+        quad.pose = pose;
+        quad.size = size;
+    };
+
+    // In place of the projection layer, when single-eye rendering is on.
+    XrCompositionLayerQuad billboardQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    EyeImage const&        billboardImage = _billboard.image;
+    if (viewsRendered && _billboard.visible && billboardImage.texture != 0 &&
+        billboardImage.width > 0 && billboardImage.height > 0) {
         bool created = false;
-        bool ready   = _presenter.EnsurePanelSwapchain(_panel.width, _panel.height, &created);
+        if (_presenter.EnsureQuadSwapchain(XrPresenterGL::Quad::Billboard,
+                                           uint32_t(billboardImage.width),
+                                           uint32_t(billboardImage.height), &created) &&
+            _presenter.PresentQuad(XrPresenterGL::Quad::Billboard, [&](int w, int h) {
+                _presenter.BlitLinear(billboardImage.texture, billboardImage.width,
+                                      billboardImage.height, w, h,
+                                      billboardImage.reticleVisible,
+                                      billboardImage.reticleNdcX, billboardImage.reticleNdcY);
+            })) {
+            quadLayer(billboardQuad, XrPresenterGL::Quad::Billboard, _billboard.pose,
+                      _billboard.size);
+            layers[layerCount++] =
+                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&billboardQuad);
+        }
+    }
+
+    // The panel goes last, so it draws on top -- even over scene geometry
+    // that's nearer. A panel failure only drops the panel; the scene still
+    // presents.
+    XrCompositionLayerQuad panelQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    if (viewsRendered && _panel.visible && _panel.draw && _panel.width > 0 && _panel.height > 0) {
+        bool created = false;
+        bool ready   = _presenter.EnsureQuadSwapchain(XrPresenterGL::Quad::Panel, _panel.width,
+                                                      _panel.height, &created);
         if (ready && (created || _panelDirty)) {
-            ready       = _presenter.PresentPanel(_panel.draw);
+            ready       = _presenter.PresentQuad(XrPresenterGL::Quad::Panel, _panel.draw);
             _panelDirty = !ready;
         }
         if (ready) {
-            quad.space         = _space;
-            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-            quad.subImage.swapchain = _presenter.PanelSwapchain();
-            quad.subImage.imageRect.offset = {0, 0};
-            quad.subImage.imageRect.extent = {int32_t(_presenter.PanelWidth()),
-                                              int32_t(_presenter.PanelHeight())};
-            quad.pose = _panel.pose;
-            quad.size = {_panel.widthMetres,
-                         _panel.widthMetres * float(_panel.height) / float(_panel.width)};
-            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+            quadLayer(panelQuad, XrPresenterGL::Quad::Panel, _panel.pose,
+                      {_panel.widthMetres,
+                       _panel.widthMetres * float(_panel.height) / float(_panel.width)});
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panelQuad);
         }
     }
 
@@ -564,6 +651,8 @@ void XrViewportSession::Shutdown()
         _turnAction       = XR_NULL_HANDLE;
         _thumbClickAction = XR_NULL_HANDLE;
         _menuAction       = XR_NULL_HANDLE;
+        _buttonXAction    = XR_NULL_HANDLE;
+        _buttonYAction    = XR_NULL_HANDLE;
         _buttonAAction    = XR_NULL_HANDLE;
         _buttonBAction    = XR_NULL_HANDLE;
         _gripAction       = XR_NULL_HANDLE;

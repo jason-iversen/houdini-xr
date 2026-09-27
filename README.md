@@ -52,22 +52,25 @@ like a picture fixed in space rather than one stuck to your face.
 The practical way to work with Karma is the node's default setup:
 **Interactive Placement** is on, so you start in a live Storm view to walk
 around and line up the shot in. Turn it off, and Karma takes over at exactly
-that pose (frozen there, if Freeze Pose is on) and starts converging. From
-then on, **hold either controller trigger** to drop back into the live view
-for as long as it's held — release, and Karma picks up from the new pose.
-The live view's renderer is **Interactive Placement Renderer**, Storm by
-default.
+that pose (frozen there, if Freeze Pose is on) and starts converging. In the
+headset, **press X** to do the same thing — it flips Interactive Placement,
+so press it again to go back to the live view, move, and press once more to
+hand the new pose to Karma. The live view's renderer is **Interactive
+Placement Renderer**, Storm by default.
 
 Storm is unaffected by either: it converges in one pass, so it re-captures
 every frame and stays a normal live viewport. Lowering **Max Render
 Resolution** makes a big difference for Karma — 640×640 upscaled is far more
 responsive than the headset's native 2080×2096 per eye.
 
-**Stereo** is off by default: the Renderer draws a single view, from between
-your eyes and wide enough to cover both, and shows it to both eyes. That's
-half the work, so Karma converges twice as fast — but the image has no depth,
-so the scene looks flat, like a very large photo. Turn Stereo on for a true
-3D render at twice the cost. The live placement view is always stereo.
+**Stereo** is off by default: the Renderer draws a single view — half the
+work, so Karma converges twice as fast — and shows it as a large picture
+standing in the room. It's placed at the depth of whatever the reticle was
+on when the view was captured and sized to exactly fill your view from where
+you stood, so from there it lines up with the scene, and the thing you were
+looking at stays at its real distance. Everything else is flat on that
+picture, and it stays put like a photo as you move. Turn Stereo on for a
+true 3D render at twice the cost. The live placement view is always stereo.
 
 Running Houdini Apprentice? Karma there is limited to 1280×720, and the node
 applies that cap automatically when a Karma delegate is selected (you'll see
@@ -147,10 +150,10 @@ your setup.
 | Parameter | Effect |
 |---|---|
 | **Live** | Starts/stops the XR session |
-| **Interactive Placement** | On by default. Overrides to a live view in the Interactive Placement Renderer for placing the viewpoint; turn off to hand over to Renderer at that exact pose. **Holding either controller trigger does the same thing** for as long as it's held |
+| **Interactive Placement** | On by default. Overrides to a live view in the Interactive Placement Renderer for placing the viewpoint; turn off to hand over to Renderer at that exact pose. **X in the headset flips it** |
 | **Interactive Placement Renderer** | What the live placement view renders with — Storm by default. Pick something that renders a clean frame in one pass |
 | **Renderer** | Which Hydra delegate renders once placement is off — Karma XPU by default; Storm, Karma CPU, etc. |
-| **Stereo** | Off by default: Renderer draws one view shown to both eyes — twice as fast, but flat. On: a true stereo render. The placement view is always stereo |
+| **Stereo** | Off by default: Renderer draws one view, shown as a picture standing in the room — twice as fast, but flat. On: a true stereo render. The placement view is always stereo |
 | **Max Render Resolution** | Caps the per-eye render size (0×0 = uncapped); upscaled to the headset |
 | **Convergence Time** | Seconds to hold the pose so a progressive renderer can accumulate |
 | **Freeze Pose** | Hold indefinitely and render to full convergence |
@@ -160,6 +163,8 @@ your setup.
 | **Resync Camera** | Re-snap the view to the RenderSettings camera |
 | **Move Speed** | Movement speed (thumbstick and A/B), metres per second |
 | **Snap Turn Angle** | Degrees per left-thumbstick flick; 0 turns snap turn off |
+| **Orbit Twist Gain** | How much the grip orbit amplifies turning the controller left/right: 3 means a 60° wrist turn orbits 180°. Tilt stays 1:1 |
+| **Y-Up During Orbit** | On by default: the orbit turns and tilts the scene but never rolls it, so the horizon stays level |
 | **Scrub Rate** | Frames per quarter turn of the wrist when scrubbing the playbar; 0 turns scrubbing off |
 | **Desktop Panel Width** | Width of the in-headset desktop panel, in metres at 1m away. Wider is easier to read |
 | **Show Reticle** | The gaze crosshair; turn off for a clean look at a converged frame |
@@ -170,31 +175,36 @@ your setup.
 
 | Input | Effect |
 |---|---|
-| Either trigger (held) | Interactive Placement while held — live view in the Interactive Placement Renderer |
+| X | **Switch** between the live placement view and Renderer (flips Interactive Placement) |
+| Y | **Stereo on/off** for Renderer (flips Stereo) |
+| Left trigger | **Play / stop** the playbar |
 | Right thumbstick forward/back | **Dolly** in and out along the line of sight |
 | Right thumbstick left/right | **Strafe** across the line of sight |
 | B / A (held) | Move **up / down**, relative to where you're looking |
 | Left thumbstick flick left/right | **Snap turn** by the Snap Turn Angle |
 | Right thumbstick click | **Place the camera** where your head is, at the current frame |
-| Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle |
-| Left trigger (held) + twist the controller | **Scrub the playbar** — clockwise forward, like a jog wheel |
+| Right grip (held) + turn the controller | **Orbit** around the surface point under the reticle — left/right turns amplified by Orbit Twist Gain |
+| Left grip (held) + twist the controller | **Scrub the playbar** — clockwise forward, like a jog wheel |
 | Left menu button | **Show/hide the desktop** — Houdini's interface on a panel in front of you |
 
 **The reticle** is the crosshair in the centre of your view. It sits *on* the
 surface you're looking at (not floating in front of it), which is also the
 point a grip orbit turns around. Hold the right grip and turn the controller —
 the scene turns with your hand, pivoting on that point, and the reticle stays
-pinned to it while you orbit. Release, and the new view stays. Like the
-trigger, holding the grip shows the live placement view, so orbiting stays
-smooth even with Karma selected; releasing hands back to your renderer.
+pinned to it while you orbit. Turning the controller left or right is
+amplified (**Orbit Twist Gain**, 3× by default), so you can go all the way
+round without straining your wrist; tilting stays 1:1. With **Y-Up During
+Orbit** on, rolling your wrist is ignored, so the horizon never tilts.
+Release, and the new view stays. Holding the grip shows the live placement
+view, so orbiting stays smooth even with Karma selected; releasing hands back
+to your renderer.
 
-**Scrubbing the playbar.** Hold the left trigger and twist your wrist, as if
+**Scrubbing the playbar.** Hold the left grip and twist your wrist, as if
 turning a dial: clockwise steps forward, anticlockwise back, 24 frames per
 quarter turn by default. It's measured from where your hand was when you
-pulled the trigger, so to go further, release, twist back and grab again. If
-the playbar is playing, the first step of a scrub stops it. Since the left
-trigger is also an Interactive Placement trigger, you see the live placement
-view while scrubbing — a frame change would restart Karma every time — and your
+squeezed the grip, so to go further, release, twist back and grab again. If
+the playbar is playing, the first step of a scrub stops it. Like the right
+grip, holding the left one shows the live placement view while scrubbing — a frame change would restart Karma every time — and your
 renderer takes over again when you let go. How quickly the headset follows
 depends on how fast your scene cooks: if it can't keep up, frames are skipped
 rather than queued, so the playbar stops when your hand does.
